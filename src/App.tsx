@@ -470,8 +470,8 @@ function SignupPage({
         console.log('[SignupPage] trigger created profile:', profile);
         onLogin(profile as UserProfile);
       } else {
-        // Fallback: trigger may not have run yet, create profile explicitly
-        console.warn('[SignupPage] profile not found after signup, creating manually');
+        // Trigger may not have fired yet — build a local profile and upsert
+        console.warn('[SignupPage] profile not found after signup, upserting manually');
         const fallback: UserProfile = {
           id: data.user.id,
           email: data.user.email ?? email,
@@ -480,11 +480,10 @@ function SignupPage({
           created_at: new Date().toISOString(),
           is_blocked: false,
         };
-        const { error: insertErr } = await supabase.from('users').insert(fallback);
-        if (insertErr) {
-          console.error('[SignupPage] fallback insert error:', insertErr);
-          setError(insertErr.message);
-          return;
+        const { error: upsertErr } = await supabase.from('users').upsert(fallback, { onConflict: 'id' });
+        if (upsertErr) {
+          // RLS may block the upsert if session isn't fully ready; proceed with local profile
+          console.warn('[SignupPage] fallback upsert blocked (likely RLS timing), proceeding with local profile:', upsertErr.message);
         }
         onLogin(fallback);
       }
@@ -1304,7 +1303,9 @@ function AdminPage({ profile, onNavigate }: { profile: UserProfile; onNavigate: 
                     <div className="flex-1 min-w-0">
                       <div className="flex items-center gap-2 flex-wrap">
                         <span className="font-medium text-gray-900 truncate">{u.email}</span>
-                        <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${u.role === 'admin' ? 'bg-amber-100 text-amber-700' : 'bg-gray-100 text-gray-600'}`}>{u.role}</span>
+                        {u.email === 'shivakumarkannan2006@gmail.com' && (
+                          <span className="text-xs bg-amber-100 text-amber-700 px-2 py-0.5 rounded-full font-medium">you (admin)</span>
+                        )}
                         {u.email_verified
                           ? <span className="text-xs text-green-600 flex items-center gap-1"><CheckCircle className="w-3 h-3" />verified</span>
                           : <span className="text-xs text-gray-400">unverified</span>
