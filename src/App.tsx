@@ -1068,14 +1068,19 @@ function AuditResultsPage({
                       )}
                     </div>
                   ) : (
-                    activities.map((a, i) => (
-                      <div key={i} className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-xs font-mono">
-                        <span className="text-teal-600 font-semibold">{a.type}</span>
-                        {a.agent && <span className="text-gray-400 ml-2">({String(a.agent)})</span>}
-                        {a.url && <div className="text-gray-500 truncate mt-0.5">{String(a.url)}</div>}
-                        {a.message && <div className="text-gray-600 mt-0.5">{String(a.message)}</div>}
-                      </div>
-                    ))
+                    activities.map((a, i) => {
+                      const agent = a.agent ? (typeof a.agent === 'string' ? a.agent : JSON.stringify(a.agent)) : null;
+                      const url = a.url ? (typeof a.url === 'string' ? a.url : JSON.stringify(a.url)) : null;
+                      const message = a.message ? (typeof a.message === 'string' ? a.message : JSON.stringify(a.message)) : null;
+                      return (
+                        <div key={i} className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-xs font-mono">
+                          <span className="text-teal-600 font-semibold">{a.type}</span>
+                          {agent && <span className="text-gray-400 ml-2">({agent})</span>}
+                          {url && <div className="text-gray-500 truncate mt-0.5">{url}</div>}
+                          {message && <div className="text-gray-600 mt-0.5">{message}</div>}
+                        </div>
+                      );
+                    })
                   )}
                 </div>
               )}
@@ -1191,7 +1196,7 @@ function AuditResultsPage({
 
 // ─── Admin Dashboard ──────────────────────────────────────────────────────────
 
-function AdminPage({ profile, onNavigate }: { profile: UserProfile; onNavigate: (p: Page) => void }) {
+function AdminPage({ profile }: { profile: UserProfile }) {
   console.log('[AdminPage] render — admin:', profile.email);
   const [users, setUsers] = useState<UserProfile[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1560,7 +1565,7 @@ export default function App() {
 
         <ErrorBoundary name="AdminPage">
           {page === 'admin' && profile?.role === 'admin' && (
-            <AdminPage profile={profile} onNavigate={handleNavigate} />
+            <AdminPage profile={profile} />
           )}
         </ErrorBoundary>
       </div>
