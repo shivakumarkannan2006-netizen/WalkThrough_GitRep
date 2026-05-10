@@ -46,6 +46,7 @@ class Settings:
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "https://shivakumarkannan2006-7m6f.bolt.new"
     ]
 
     # Feature Flags
