@@ -9,7 +9,14 @@ import { supabase } from './supabase';
 import { ErrorBoundary } from './ErrorBoundary';
 import type { User } from '@supabase/supabase-js';
 
-const AUDIT_API = import.meta.env.VITE_AUDIT_API_URL ?? '';
+const AUDIT_API = (() => {
+  const url = import.meta.env.VITE_AUDIT_API_URL || '';
+  if (typeof window !== 'undefined') {
+    console.log('[SHIELD_DEBUG] VITE_AUDIT_API_URL environment variable:', url);
+    console.log('[SHIELD_DEBUG] All env vars:', import.meta.env);
+  }
+  return url;
+})();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -924,55 +931,117 @@ function AuditResultsPage({
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startAudit = useCallback(async () => {
-    if (!auditUrl || !AUDIT_API) {
-      console.warn('[AuditResultsPage] AUDIT_API not configured, VITE_AUDIT_API_URL=', AUDIT_API);
+    console.log('[SHIELD] startAudit called with auditUrl:', auditUrl, 'AUDIT_API:', AUDIT_API);
+
+    if (!auditUrl) {
+      console.warn('[SHIELD] No audit URL provided');
       setBackendUnavailable(true);
       return;
     }
+
+    if (!AUDIT_API) {
+      console.error('[SHIELD] AUDIT_API not configured. VITE_AUDIT_API_URL environment variable is missing or empty.');
+      console.error('[SHIELD] Please set VITE_AUDIT_API_URL in your Bolt environment and redeploy.');
+      setBackendUnavailable(true);
+      return;
+    }
+
     setRunning(true);
     setIssues([]);
     setPages([]);
     setActivities([]);
+
     try {
-      const res = await fetch(`${AUDIT_API}/api/start-audit`, {
+      console.log('[SHIELD] Initiating audit with backend URL:', AUDIT_API);
+      const startUrl = `${AUDIT_API}/api/start-audit`;
+      console.log('[SHIELD] POST to:', startUrl);
+
+      const res = await fetch(startUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_url: auditUrl, company_id: 'user-audit' }),
       });
+
+      console.log('[SHIELD] Backend response status:', res.status);
+
+      if (!res.ok) {
+        const errText = await res.text();
+        console.error('[SHIELD] Backend error response:', errText);
+        throw new Error(`Backend error: ${res.status} ${errText}`);
+      }
+
       const data = await res.json();
-      if (!data.audit_session_id) { setRunning(false); return; }
+      console.log('[SHIELD] Audit session created:', data);
+
+      if (!data.audit_session_id) {
+        console.error('[SHIELD] No audit_session_id in response:', data);
+        setRunning(false);
+        setBackendUnavailable(true);
+        return;
+      }
+
       setSessionId(data.audit_session_id);
+      console.log('[SHIELD] Session ID set:', data.audit_session_id);
 
       const wsUrl = AUDIT_API.replace('https://', 'wss://').replace('http://', 'ws://');
-      const ws = new WebSocket(`${wsUrl}/ws/audit/${data.audit_session_id}`);
+      const wsPath = `${wsUrl}/ws/audit/${data.audit_session_id}`;
+      console.log('[SHIELD] Attempting WebSocket connection to:', wsPath);
+
+      const ws = new WebSocket(wsPath);
+
+      ws.onopen = () => console.log('[SHIELD] WebSocket connected');
+      ws.onerror = (e) => console.error('[SHIELD] WebSocket error:', e);
+      ws.onclose = () => console.log('[SHIELD] WebSocket closed');
+
       ws.onmessage = e => {
-        const msg: AuditUpdate = JSON.parse(e.data);
-        setActivities(prev => [msg, ...prev.slice(0, 149)]);
-        if (msg.type === 'audit_complete') setRunning(false);
+        try {
+          const msg: AuditUpdate = JSON.parse(e.data);
+          console.log('[SHIELD] WebSocket message:', msg.type);
+          setActivities(prev => [msg, ...prev.slice(0, 149)]);
+          if (msg.type === 'audit_complete') {
+            console.log('[SHIELD] Audit complete');
+            setRunning(false);
+          }
+        } catch (err) {
+          console.error('[SHIELD] Failed to parse WebSocket message:', err);
+        }
       };
+
       wsRef.current = ws;
 
       const poll = setInterval(async () => {
         try {
           const [issR, pgR, stR] = await Promise.all([
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/issues`).then(r => r.json()),
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/pages`).then(r => r.json()),
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/status`).then(r => r.json()),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/issues`).then(async r => {
+              if (!r.ok) throw new Error(`Issues API: ${r.status}`);
+              return r.json();
+            }),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/pages`).then(async r => {
+              if (!r.ok) throw new Error(`Pages API: ${r.status}`);
+              return r.json();
+            }),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/status`).then(async r => {
+              if (!r.ok) throw new Error(`Status API: ${r.status}`);
+              return r.json();
+            }),
           ]);
           setIssues(issR.issues ?? []);
           setPages(pgR.pages ?? []);
           setStatus(stR);
+          console.log('[SHIELD] Poll update - Issues:', (issR.issues ?? []).length, 'Pages:', (pgR.pages ?? []).length);
           if (stR.status === 'completed' || stR.status === 'failed') {
+            console.log('[SHIELD] Audit status:', stR.status);
             setRunning(false);
             clearInterval(poll);
           }
         } catch (err) {
-          console.error('[AuditResultsPage] poll error:', err);
+          console.error('[SHIELD] Poll error:', err);
         }
       }, 2500);
       pollRef.current = poll;
     } catch (err) {
-      console.error('[AuditResultsPage] startAudit error:', err);
+      console.error('[SHIELD] startAudit error:', err);
+      console.error('[SHIELD] Stack:', err instanceof Error ? err.stack : 'N/A');
       setBackendUnavailable(true);
       setRunning(false);
     }
@@ -1014,14 +1083,23 @@ function AuditResultsPage({
         </div>
 
         {backendUnavailable && (
-          <div role="alert" className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-5 mb-6">
-            <p className="font-semibold mb-1">Audit engine not configured</p>
-            <p className="text-sm">
-              The crawling crew runs on a separate Python backend. Set{' '}
-              <code className="bg-amber-100 px-1 rounded text-xs font-mono">VITE_AUDIT_API_URL</code>{' '}
-              in your environment to point to a deployed backend, then rebuild.{' '}
-              The site record has been saved to your dashboard.
-            </p>
+          <div role="alert" className="bg-red-50 border border-red-300 text-red-800 rounded-xl p-5 mb-6 space-y-3">
+            <div>
+              <p className="font-semibold mb-1">Backend not connected</p>
+              <p className="text-sm mb-2">
+                The audit engine requires a deployed backend. Follow these steps:
+              </p>
+              <ol className="text-sm list-decimal list-inside space-y-1 ml-1">
+                <li><strong>Deploy backend on Railway:</strong> Push code and configure secrets (GEMINI_API_KEY, SUPABASE_*)</li>
+                <li><strong>Copy Railway URL:</strong> Get your deployed backend URL (e.g., https://your-service.up.railway.app)</li>
+                <li><strong>Set environment variable:</strong> In Bolt, add <code className="bg-red-100 px-1 rounded text-xs font-mono">VITE_AUDIT_API_URL</code> = your Railway URL</li>
+                <li><strong>Rebuild:</strong> Redeploy this frontend on Bolt</li>
+                <li><strong>Check console:</strong> Open DevTools (F12) → Console tab, look for [SHIELD] logs to verify connection</li>
+              </ol>
+            </div>
+            <div className="text-xs bg-red-100 p-2 rounded font-mono break-all">
+              Current VITE_AUDIT_API_URL: {AUDIT_API || '(not set)'}
+            </div>
           </div>
         )}
 
