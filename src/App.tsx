@@ -9,14 +9,29 @@ import { supabase } from './supabase';
 import { ErrorBoundary } from './ErrorBoundary';
 import type { User } from '@supabase/supabase-js';
 
-const AUDIT_API = (() => {
-  const url = import.meta.env.VITE_AUDIT_API_URL || '';
-  if (typeof window !== 'undefined') {
-    console.log('[SHIELD_DEBUG] VITE_AUDIT_API_URL environment variable:', url);
-    console.log('[SHIELD_DEBUG] All env vars:', import.meta.env);
+let AUDIT_API = '';
+
+if (typeof window !== 'undefined') {
+  const sources = [];
+
+  const envVar = import.meta.env.VITE_AUDIT_API_URL;
+  if (envVar) {
+    AUDIT_API = envVar;
+    sources.push(`build-time env var (${AUDIT_API})`);
   }
-  return url;
-})();
+
+  const runtimeVar = (window as any).__VITE_AUDIT_API_URL;
+  if (runtimeVar) {
+    AUDIT_API = runtimeVar;
+    sources.push(`runtime injection (${AUDIT_API})`);
+  }
+
+  if (!AUDIT_API) {
+    console.warn('[SHIELD] AUDIT_API not configured from any source');
+  } else {
+    console.log('[SHIELD] AUDIT_API loaded from:', sources.join(' or '));
+  }
+}
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -563,9 +578,11 @@ function SignupPage({
 function DashboardPage({
   profile,
   onNavigate,
+  onStartAudit,
 }: {
   profile: UserProfile;
   onNavigate: (p: Page) => void;
+  onStartAudit: (url: string, name: string, siteId: string) => void;
 }) {
   console.log('[DashboardPage] render — user:', profile.email);
   const [sites, setSites] = useState<Site[]>([]);
@@ -678,7 +695,7 @@ function DashboardPage({
                           {groupSites.map((s, idx) => (
                             <button
                               key={s.id}
-                              onClick={() => onNavigate('audit-results')}
+                              onClick={() => onStartAudit(s.site_url, s.site_name || 'Unnamed', s.id)}
                               className="flex-shrink-0 flex items-center gap-2 bg-gray-50 hover:bg-teal-50 border border-gray-200 hover:border-teal-300 text-gray-600 hover:text-teal-700 px-4 py-2 rounded-lg text-sm transition"
                             >
                               <Clock className="w-3.5 h-3.5" />
@@ -1061,6 +1078,8 @@ function AuditResultsPage({
     (acc[iss.agent_name] = acc[iss.agent_name] ?? []).push(iss);
     return acc;
   }, {});
+
+  console.log('[SHIELD_RENDER] AuditResultsPage - auditUrl:', auditUrl, 'AUDIT_API:', AUDIT_API, 'sessionId:', sessionId, 'running:', running, 'backendUnavailable:', backendUnavailable);
 
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8">
@@ -1626,7 +1645,7 @@ export default function App() {
         </ErrorBoundary>
 
         <ErrorBoundary name="DashboardPage">
-          {page === 'dashboard' && profile && <DashboardPage profile={profile} onNavigate={handleNavigate} />}
+          {page === 'dashboard' && profile && <DashboardPage profile={profile} onNavigate={handleNavigate} onStartAudit={handleStartAudit} />}
         </ErrorBoundary>
 
         <ErrorBoundary name="EvaluationPage">

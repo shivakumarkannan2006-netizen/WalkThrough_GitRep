@@ -11,6 +11,14 @@
   </head>
   <body>
     <div id="root"></div>
+    <script>
+      window.__VITE_AUDIT_API_URL = localStorage.getItem('audit_api_url') || '';
+      if (!window.__VITE_AUDIT_API_URL) {
+        const params = new URL(window.location).searchParams;
+        window.__VITE_AUDIT_API_URL = params.get('audit_api_url') || '';
+      }
+      console.log('[SHIELD] Runtime config - AUDIT_API_URL:', window.__VITE_AUDIT_API_URL);
+    </script>
     <script type="module" src="/src/main.tsx"></script>
   </body>
 </html>
