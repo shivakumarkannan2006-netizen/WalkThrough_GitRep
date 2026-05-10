@@ -4,7 +4,7 @@
 - ✅ Node.js installed: `node -v` (should be 18+)
 - ✅ Python installed: `python --version` (should be 3.9+)
 - ✅ Supabase project created (database already provisioned)
-- ✅ OpenAI API key or Gemini API key
+- ✅ Google Gemini API key
 
 ## Step 1: Backend Setup (2 minutes)
 
@@ -24,7 +24,7 @@ cp .env.example .env
 # - SUPABASE_URL
 # - SUPABASE_KEY
 # - SUPABASE_SERVICE_ROLE_KEY
-# - OPENAI_API_KEY (or GEMINI_API_KEY)
+# - GEMINI_API_KEY
 
 # Start backend
 python main.py

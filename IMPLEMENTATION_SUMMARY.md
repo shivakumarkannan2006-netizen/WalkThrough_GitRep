@@ -94,7 +94,7 @@ This document verifies that EVERY requirement from the original plan has been im
 
 **Settings Implemented**
 - ✅ Supabase connection (URL, keys, service role)
-- ✅ LLM model selection (OpenAI/Gemini)
+- ✅ LLM model: Google Gemini
 - ✅ Browserbase credentials (optional for stealth)
 - ✅ Audit thresholds:
   - MAX_PAGES_PER_AUDIT = 500

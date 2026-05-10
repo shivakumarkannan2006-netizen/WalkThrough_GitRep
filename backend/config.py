@@ -13,9 +13,7 @@ class Settings:
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
     # LLM
-    OPENAI_API_KEY: str = os.getenv("OPENAI_API_KEY", "")
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
-    LLM_MODEL: str = "openai"  # "openai" or "gemini"
 
     # Browserbase
     BROWSERBASE_API_KEY: str = os.getenv("BROWSERBASE_API_KEY", "")

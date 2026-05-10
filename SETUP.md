@@ -27,7 +27,7 @@ project/
 - Python 3.9+
 - Git
 - Supabase account (database already provisioned)
-- OpenAI or Gemini API key (for LLM analysis)
+- Google Gemini API key
 
 ## Backend Setup
 
@@ -54,7 +54,7 @@ cp .env.example .env
 # - SUPABASE_URL
 # - SUPABASE_KEY
 # - SUPABASE_SERVICE_ROLE_KEY
-# - OPENAI_API_KEY (or GEMINI_API_KEY)
+# - GEMINI_API_KEY
 ```
 
 ### 4. Start FastAPI Server

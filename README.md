@@ -25,7 +25,7 @@ Shield Agent is designed for developers and teams using AI-generated website bui
 - Node.js 18+
 - Python 3.9+
 - Supabase account (database provisioned)
-- OpenAI or Gemini API key
+- Google Gemini API key
 
 ### 1. Backend Setup (3 minutes)
 
