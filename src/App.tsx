@@ -612,14 +612,10 @@ function DashboardPage({
         </button>
 
         {/* Stats row */}
-        <div className="grid grid-cols-2 gap-4 mb-8">
-          <div className="bg-white border border-gray-200 rounded-xl p-5">
+        <div className="mb-8">
+          <div className="bg-white border border-gray-200 rounded-xl p-5 inline-block">
             <p className="text-gray-400 text-xs font-medium mb-1">Sites Audited</p>
             <p className="text-3xl font-bold text-gray-900">{sites.length}</p>
-          </div>
-          <div className="bg-white border border-gray-200 rounded-xl p-5">
-            <p className="text-gray-400 text-xs font-medium mb-1">Status</p>
-            <p className="text-lg font-semibold text-green-500">Active</p>
           </div>
         </div>
 
