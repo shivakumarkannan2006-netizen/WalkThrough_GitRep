@@ -20,13 +20,18 @@ from navigator import ShieldNavigator
 from crew import CrewOrchestrator
 from db import init_supabase
 
-# Configure logging
-logging.basicConfig(level=logging.INFO)
+# Configure logging - detailed for debugging Railway 502 issues
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
 logger = logging.getLogger(__name__)
+logger.info("Backend module loading...")
 
-# Global storage for active sessions and WebSocket connections
+# Global storage for active sessions, WebSocket connections, and Supabase client
 active_sessions = {}
 active_websockets = {}
+supabase = None  # Initialized during app startup in lifespan()
 
 settings = get_settings()
 
@@ -48,8 +53,21 @@ def _is_allowed_origin(origin: str) -> bool:
 async def lifespan(app: FastAPI):
     """App lifecycle management"""
     logger.info("Shield Agent starting up...")
-    logger.info(f"Allowed CORS origins (exact): {settings.CORS_ORIGINS}")
+    logger.info(f"Server host: {settings.SERVER_HOST}:{settings.SERVER_PORT}")
+    logger.info(f"Allowed CORS origins: {settings.CORS_ORIGINS}")
+
+    # Initialize Supabase during startup (not at import time)
+    try:
+        global supabase
+        supabase = init_supabase()
+        logger.info("Backend ready to accept requests")
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase at startup: {e}")
+        logger.error("Backend will not function without Supabase. Check environment variables.")
+        raise
+
     yield
+
     logger.info("Shield Agent shutting down...")
     for session_id, session in active_sessions.items():
         try:
@@ -97,9 +115,6 @@ async def cors_override(request: Request, call_next):
         response.headers["Vary"] = "Origin"
     return response
 
-# Initialize Supabase
-supabase = init_supabase()
-
 # ============== CORE AUDIT ENDPOINTS ==============
 
 class StartAuditRequest(BaseModel):
@@ -112,11 +127,17 @@ class StartAuditRequest(BaseModel):
 @app.post("/api/start-audit")
 async def start_audit(body: StartAuditRequest):
     """Start a new web audit on target URL"""
+    if not supabase:
+        logger.error("POST /api/start-audit: Supabase not initialized")
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
+
     target_url = body.target_url
     company_id = body.company_id
     username = body.username
     password = body.password
     pdf_file_ids = body.pdf_file_ids
+
+    logger.info(f"Starting audit: target={target_url}, company={company_id}")
     try:
         audit_session_id = str(uuid.uuid4())
 
@@ -395,8 +416,17 @@ async def run_audit(audit_session_id: str):
 
 @app.get("/health")
 async def health_check():
-    """Health check endpoint"""
-    return {"status": "ok", "service": "Shield Agent API"}
+    """Health check endpoint - validates backend readiness"""
+    if not supabase:
+        logger.error("Health check: Supabase not initialized")
+        raise HTTPException(status_code=503, detail="Backend starting up - Supabase not ready")
+
+    return {
+        "status": "ok",
+        "service": "Shield Agent API",
+        "supabase": "connected",
+        "port": settings.SERVER_PORT,
+    }
 
 if __name__ == "__main__":
     import uvicorn

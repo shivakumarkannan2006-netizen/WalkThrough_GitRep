@@ -11,7 +11,7 @@ logger = logging.getLogger(__name__)
 _supabase_client = None
 
 def init_supabase():
-    """Initialize Supabase client"""
+    """Initialize Supabase client with proper error handling"""
     global _supabase_client
 
     if _supabase_client:
@@ -20,12 +20,17 @@ def init_supabase():
     settings = get_settings()
 
     if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
-        raise ValueError("SUPABASE_URL and SUPABASE_KEY must be set")
+        msg = "SUPABASE_URL and SUPABASE_KEY environment variables must be set"
+        logger.error(msg)
+        raise ValueError(msg)
 
-    _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-    logger.info("Supabase client initialized")
-
-    return _supabase_client
+    try:
+        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
+        logger.info("Supabase client initialized successfully")
+        return _supabase_client
+    except Exception as e:
+        logger.error(f"Failed to initialize Supabase client: {e}")
+        raise
 
 def get_supabase():
     """Get existing Supabase client"""
