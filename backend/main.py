@@ -11,6 +11,7 @@ from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Depends
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
 from contextlib import asynccontextmanager
+from pydantic import BaseModel
 import uuid
 from typing import Optional, List
 
@@ -100,8 +101,6 @@ async def cors_override(request: Request, call_next):
 supabase = init_supabase()
 
 # ============== CORE AUDIT ENDPOINTS ==============
-
-from pydantic import BaseModel
 
 class StartAuditRequest(BaseModel):
     target_url: str
