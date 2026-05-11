@@ -11,7 +11,7 @@ pyspellchecker==0.8.0
 google-generativeai==0.3.0
 langchain==0.1.0
 exifread==3.0.0
-pillow==10.1.0
+pillow>=11.0.0
 aiofiles==23.2.1
 python-multipart==0.0.6
 websockets==12.0
