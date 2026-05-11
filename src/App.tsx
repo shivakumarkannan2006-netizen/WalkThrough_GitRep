@@ -732,46 +732,70 @@ function DashboardPage({
 
 // ─── Evaluation Page ──────────────────────────────────────────────────────────
 
-const TECH_CATEGORIES = [
+// Tech stack tools with metadata for checkboxes
+interface TechStackTool {
+  id: string;
+  name: string;
+  category: 'ai-builder' | 'hosting';
+  icon?: React.ReactNode;
+  color?: string;
+}
+
+const TECH_STACK_TOOLS: TechStackTool[] = [
+  // AI Site Builders
+  { id: 'lovable', name: 'Lovable', category: 'ai-builder' },
+  { id: 'base44', name: 'Base44', category: 'ai-builder' },
+  { id: 'replit', name: 'Replit', category: 'ai-builder' },
+  { id: 'bolt-new', name: 'Bolt.new', category: 'ai-builder' },
+  { id: 'v0-vercel', name: 'v0 by Vercel', category: 'ai-builder' },
+  { id: 'cursor', name: 'Cursor', category: 'ai-builder' },
+  { id: 'windsurf', name: 'Windsurf', category: 'ai-builder' },
+  { id: 'copilot', name: 'Copilot', category: 'ai-builder' },
+
+  // Hosting & Deployment
+  { id: 'railway', name: 'Railway', category: 'hosting' },
+  { id: 'render', name: 'Render', category: 'hosting' },
+  { id: 'vercel', name: 'Vercel', category: 'hosting' },
+  { id: 'aws', name: 'AWS', category: 'hosting' },
+];
+
+// Error analysis modes
+interface ErrorAnalysisMode {
+  id: string;
+  label: string;
+  description: string;
+  requiresMCP: boolean;
+  platforms: string[]; // which platforms support this mode
+}
+
+const ERROR_ANALYSIS_MODES: ErrorAnalysisMode[] = [
   {
-    key: 'AI Site Builders',
-    icon: <Zap className="w-4 h-4" />,
-    options: ['Lovable', 'Bolt.new', 'Base44', 'v0 by Vercel'],
+    id: 'find-errors',
+    label: 'Finding Errors',
+    description: 'Identify issues in your codebase',
+    requiresMCP: false,
+    platforms: ['all'],
   },
   {
-    key: 'Code Editors & AI Coding',
-    icon: <Code className="w-4 h-4" />,
-    options: ['Cursor', 'Windsurf', 'VS Code + Copilot', 'GitHub Copilot', 'Replit'],
+    id: 'find-and-fix',
+    label: 'Finding Errors & Fixes',
+    description: 'Identify issues and provide solutions',
+    requiresMCP: false,
+    platforms: ['all'],
   },
   {
-    key: 'Databases',
-    icon: <Database className="w-4 h-4" />,
-    options: ['Supabase', 'Firebase', 'MongoDB', 'PostgreSQL', 'MySQL', 'Redis'],
+    id: 'fix-and-push',
+    label: 'Finding, Fixing & Pushing to GitHub',
+    description: 'Complete workflow with GitHub integration',
+    requiresMCP: true,
+    platforms: ['all'],
   },
   {
-    key: 'Frontend Frameworks',
-    icon: <Globe className="w-4 h-4" />,
-    options: ['React', 'Next.js'],
-  },
-  {
-    key: 'Backend & APIs',
-    icon: <SettingsIcon className="w-4 h-4" />,
-    options: ['Node.js', 'Express', 'FastAPI'],
-  },
-  {
-    key: 'AI & LLM Services',
-    icon: <Cpu className="w-4 h-4" />,
-    options: ['OpenAI', 'Gemini', 'Anthropic Claude', 'LangChain'],
-  },
-  {
-    key: 'Hosting & Deployment',
-    icon: <Cloud className="w-4 h-4" />,
-    options: ['Vercel', 'Railway', 'Render', 'AWS', 'GitHub Pages / Cloudflare Pages'],
-  },
-  {
-    key: 'Errors',
-    icon: <AlertTriangle className="w-4 h-4" />,
-    options: [],
+    id: 'fix-in-builder',
+    label: 'Finding, Fixing & Fixing in Builder',
+    description: 'Direct MCP integration - fixes applied in your AI builder itself',
+    requiresMCP: true,
+    platforms: ['lovable', 'base44', 'replit'],
   },
 ];
 
@@ -785,32 +809,65 @@ function EvaluationPage({
   onStartAudit: (url: string, siteName: string, siteId: string) => void;
 }) {
   console.log('[EvaluationPage] render — user:', profile.email);
-  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [aiBuilderSelected, setAiBuilderSelected] = useState<Set<string>>(new Set());
+  const [hostingSelected, setHostingSelected] = useState<Set<string>>(new Set());
+  const [analysisMode, setAnalysisMode] = useState<string | null>(null);
   const [url, setUrl] = useState('');
   const [siteName, setSiteName] = useState('');
   const [urlError, setUrlError] = useState('');
   const [saving, setSaving] = useState(false);
+  const [step, setStep] = useState<'tech-stack' | 'analysis' | 'details'> ('tech-stack');
 
-  const toggle = (opt: string) => {
-    setSelected(prev => {
-      const next = new Set(prev);
-      if (next.has(opt)) next.delete(opt); else next.add(opt);
-      return next;
-    });
+  const toggleTool = (toolId: string, category: 'ai-builder' | 'hosting') => {
+    if (category === 'ai-builder') {
+      setAiBuilderSelected(prev => {
+        const next = new Set(prev);
+        if (next.has(toolId)) next.delete(toolId); else next.add(toolId);
+        return next;
+      });
+    } else {
+      setHostingSelected(prev => {
+        const next = new Set(prev);
+        if (next.has(toolId)) next.delete(toolId); else next.add(toolId);
+        return next;
+      });
+    }
+  };
+
+  const proceedToAnalysisMode = () => {
+    if (aiBuilderSelected.size === 0 && hostingSelected.size === 0) {
+      setUrlError('Please select at least one technology.');
+      return;
+    }
+    setUrlError('');
+    setStep('analysis');
+  };
+
+  const proceedToDetails = (modeId: string) => {
+    setAnalysisMode(modeId);
+    setUrlError('');
+    setStep('details');
   };
 
   const handleStart = async () => {
     setUrlError('');
-    if (selected.size === 0) { setUrlError('Please select at least one technology.'); return; }
     if (!url) { setUrlError('Please enter your website URL.'); return; }
     try { new URL(url); } catch { setUrlError('Enter a valid URL (include https://).'); return; }
+    if (!analysisMode) { setUrlError('Please select an analysis mode.'); return; }
 
     setSaving(true);
     try {
       console.log('[EvaluationPage] inserting user_site for user:', profile.id, 'url:', url);
+      const selectedTools = Array.from(aiBuilderSelected).concat(Array.from(hostingSelected));
       const { data: site, error: siteErr } = await supabase
         .from('user_sites')
-        .insert({ user_id: profile.id, site_url: url, site_name: siteName || url })
+        .insert({
+          user_id: profile.id,
+          site_url: url,
+          site_name: siteName || url,
+          tech_stack: selectedTools,
+          analysis_mode: analysisMode,
+        })
         .select('id')
         .single();
 
@@ -835,105 +892,217 @@ function EvaluationPage({
     }
   };
 
+  const getAvailableModes = (): ErrorAnalysisMode[] => {
+    const selectedBuilders = Array.from(aiBuilderSelected);
+    const isMCPPlatform = selectedBuilders.some(b => ['lovable', 'base44', 'replit'].includes(b));
+    return ERROR_ANALYSIS_MODES.filter(mode =>
+      mode.platforms.includes('all') || (isMCPPlatform && mode.platforms.includes(selectedBuilders[0]))
+    );
+  };
+
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-10">
-      <div className="max-w-3xl mx-auto">
+      <div className="max-w-4xl mx-auto">
         <button onClick={() => onNavigate('dashboard')} className="flex items-center gap-2 text-gray-400 hover:text-gray-700 text-sm mb-8 transition">
           <ArrowLeft className="w-4 h-4" />
           Back to Dashboard
         </button>
 
         <h1 className="text-2xl font-bold text-gray-900 mb-2">New Site Evaluation</h1>
-        <p className="text-gray-400 text-sm mb-8">Select the technologies your site uses, then enter your URL to begin the audit.</p>
+        <p className="text-gray-400 text-sm mb-8">Select your AI site builder and hosting platform, choose your analysis approach, then enter your URL to begin the audit.</p>
 
-        {/* Step 1 */}
-        <div className="mb-8">
-          <div className="flex items-center gap-2 mb-5">
-            <div className="w-6 h-6 bg-teal-600 text-white rounded-full flex items-center justify-center text-xs font-bold">1</div>
-            <h2 className="font-semibold text-gray-900">Select your tech stack</h2>
-            {selected.size > 0 && (
-              <span className="ml-auto text-xs bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full font-medium">{selected.size} selected</span>
-            )}
-          </div>
+        {/* Step 1: Tech Stack Selection */}
+        {step === 'tech-stack' && (
+          <div className="mb-8">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="w-6 h-6 bg-teal-600 text-white rounded-full flex items-center justify-center text-xs font-bold">1</div>
+              <h2 className="font-semibold text-gray-900">Select your tech stack</h2>
+              <span className="ml-auto text-xs bg-teal-100 text-teal-700 px-2 py-0.5 rounded-full font-medium">
+                {aiBuilderSelected.size + hostingSelected.size} selected
+              </span>
+            </div>
 
-          <div className="space-y-4">
-            {TECH_CATEGORIES.map(cat => (
-              <div key={cat.key} className="bg-white border border-gray-200 rounded-xl p-5">
-                <div className="flex items-center gap-2 mb-3 text-gray-500">
-                  {cat.icon}
-                  <span className="font-medium text-sm">{cat.key}</span>
-                </div>
-                <div className="flex flex-wrap gap-2">
-                  {cat.options.length === 0 ? (
-                    <span className="text-gray-400 text-xs italic">Select this category to flag known errors</span>
-                  ) : cat.options.map(opt => {
-                    const active = selected.has(opt);
-                    return (
-                      <button
-                        key={opt}
-                        onClick={() => toggle(opt)}
-                        className={`text-sm px-3 py-1.5 rounded-full border transition font-medium ${active ? 'bg-teal-600 border-teal-600 text-white' : 'border-gray-300 text-gray-600 hover:border-teal-400 hover:text-teal-700 hover:bg-teal-50'}`}
-                      >
-                        {active && <span className="mr-1 text-xs">✓</span>}
-                        {opt}
-                      </button>
-                    );
-                  })}
-                </div>
+            {/* AI Site Builders */}
+            <div className="mb-8">
+              <h3 className="font-medium text-gray-900 mb-4 flex items-center gap-2">
+                <Zap className="w-4 h-4 text-amber-500" />
+                AI Site Builders
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {TECH_STACK_TOOLS.filter(t => t.category === 'ai-builder').map(tool => (
+                  <button
+                    key={tool.id}
+                    onClick={() => toggleTool(tool.id, 'ai-builder')}
+                    className={`relative p-4 rounded-lg border-2 transition ${
+                      aiBuilderSelected.has(tool.id)
+                        ? 'border-teal-500 bg-teal-50'
+                        : 'border-gray-200 bg-white hover:border-teal-300 hover:bg-teal-50'
+                    }`}
+                  >
+                    <div className="flex flex-col items-center gap-2">
+                      {aiBuilderSelected.has(tool.id) && (
+                        <div className="absolute top-2 right-2 w-5 h-5 bg-teal-600 rounded-full flex items-center justify-center">
+                          <CheckCircle className="w-4 h-4 text-white" />
+                        </div>
+                      )}
+                      <span className="text-sm font-medium text-gray-900">{tool.name}</span>
+                    </div>
+                  </button>
+                ))}
               </div>
-            ))}
-          </div>
-        </div>
-
-        {/* Step 2 */}
-        <div className="mb-8">
-          <div className="flex items-center gap-2 mb-5">
-            <div className="w-6 h-6 bg-teal-600 text-white rounded-full flex items-center justify-center text-xs font-bold">2</div>
-            <h2 className="font-semibold text-gray-900">Enter your website details</h2>
-          </div>
-
-          <div className="bg-white border border-gray-200 rounded-xl p-5 space-y-4">
-            <div>
-              <label className="block text-gray-600 text-sm font-medium mb-1.5" htmlFor="site-name">Site Name (optional)</label>
-              <input
-                id="site-name"
-                type="text"
-                value={siteName}
-                onChange={e => setSiteName(e.target.value)}
-                placeholder="My Awesome Project"
-                className="w-full bg-gray-50 border border-gray-200 text-gray-900 px-4 py-2.5 rounded-lg text-sm focus:outline-none focus:border-teal-500 placeholder-gray-400 transition"
-              />
             </div>
-            <div>
-              <label className="block text-gray-600 text-sm font-medium mb-1.5" htmlFor="site-url">Website URL</label>
-              <input
-                id="site-url"
-                type="url"
-                value={url}
-                onChange={e => setUrl(e.target.value)}
-                placeholder="https://your-site.com"
-                className={`w-full bg-gray-50 border text-gray-900 px-4 py-2.5 rounded-lg text-sm focus:outline-none placeholder-gray-400 transition ${urlError ? 'border-red-400 focus:border-red-500' : 'border-gray-200 focus:border-teal-500'}`}
-              />
-              {urlError && <p role="alert" className="text-red-500 text-xs mt-2">{urlError}</p>}
-              <p className="text-gray-400 text-xs mt-1.5">The crew will crawl this URL and all reachable sub-pages.</p>
+
+            {/* Hosting & Deployment */}
+            <div className="mb-8">
+              <h3 className="font-medium text-gray-900 mb-4 flex items-center gap-2">
+                <Cloud className="w-4 h-4 text-blue-500" />
+                Hosting & Deployment
+              </h3>
+              <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+                {TECH_STACK_TOOLS.filter(t => t.category === 'hosting').map(tool => (
+                  <button
+                    key={tool.id}
+                    onClick={() => toggleTool(tool.id, 'hosting')}
+                    className={`relative p-4 rounded-lg border-2 transition ${
+                      hostingSelected.has(tool.id)
+                        ? 'border-blue-500 bg-blue-50'
+                        : 'border-gray-200 bg-white hover:border-blue-300 hover:bg-blue-50'
+                    }`}
+                  >
+                    <div className="flex flex-col items-center gap-2">
+                      {hostingSelected.has(tool.id) && (
+                        <div className="absolute top-2 right-2 w-5 h-5 bg-blue-600 rounded-full flex items-center justify-center">
+                          <CheckCircle className="w-4 h-4 text-white" />
+                        </div>
+                      )}
+                      <span className="text-sm font-medium text-gray-900">{tool.name}</span>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {urlError && <div className="bg-red-50 border border-red-300 text-red-800 px-4 py-3 rounded-lg text-sm mb-4">{urlError}</div>}
+
+            <button
+              onClick={proceedToAnalysisMode}
+              className="w-full bg-teal-600 text-white py-3 rounded-lg font-medium hover:bg-teal-700 transition"
+            >
+              Continue to Analysis Mode
+            </button>
+          </div>
+        )}
+
+        {/* Step 2: Analysis Mode Selection */}
+        {step === 'analysis' && (
+          <div className="mb-8">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="w-6 h-6 bg-teal-600 text-white rounded-full flex items-center justify-center text-xs font-bold">2</div>
+              <h2 className="font-semibold text-gray-900">Choose your analysis approach</h2>
+            </div>
+
+            <div className="space-y-3 mb-8">
+              {getAvailableModes().map(mode => (
+                <button
+                  key={mode.id}
+                  onClick={() => proceedToDetails(mode.id)}
+                  className={`w-full p-5 rounded-lg border-2 text-left transition ${
+                    analysisMode === mode.id
+                      ? 'border-teal-500 bg-teal-50'
+                      : 'border-gray-200 bg-white hover:border-teal-300 hover:bg-teal-50'
+                  }`}
+                >
+                  <div className="flex items-start gap-3">
+                    {analysisMode === mode.id && (
+                      <CheckCircle className="w-5 h-5 text-teal-600 mt-0.5 flex-shrink-0" />
+                    )}
+                    <div>
+                      <p className="font-medium text-gray-900">{mode.label}</p>
+                      <p className="text-sm text-gray-500 mt-1">{mode.description}</p>
+                      {mode.requiresMCP && (
+                        <p className="text-xs text-teal-600 mt-2">MCP Integration Ready</p>
+                      )}
+                      {mode.platforms.includes('lovable') && (
+                        <p className="text-xs text-amber-600 mt-1">Direct AI builder integration available</p>
+                      )}
+                    </div>
+                  </div>
+                </button>
+              ))}
+            </div>
+
+            <div className="flex gap-3">
+              <button
+                onClick={() => setStep('tech-stack')}
+                className="flex-1 bg-gray-200 text-gray-900 py-3 rounded-lg font-medium hover:bg-gray-300 transition"
+              >
+                Back
+              </button>
+              <button
+                onClick={() => setStep('details')}
+                disabled={!analysisMode}
+                className="flex-1 bg-teal-600 text-white py-3 rounded-lg font-medium hover:bg-teal-700 transition disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                Continue
+              </button>
             </div>
           </div>
-        </div>
+        )}
 
-        <div className="flex gap-3">
-          <button onClick={() => onNavigate('dashboard')} className="border border-gray-200 hover:border-gray-400 text-gray-500 hover:text-gray-900 px-5 py-2.5 rounded-lg text-sm transition">
-            Cancel
-          </button>
-          <button
-            onClick={handleStart}
-            disabled={selected.size === 0 || !url || saving}
-            aria-busy={saving}
-            className="flex items-center gap-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition"
-          >
-            <Play className="w-4 h-4" />
-            {saving ? 'Saving…' : 'Start Audit'}
-          </button>
-        </div>
+        {/* Step 3: Website Details */}
+        {step === 'details' && (
+          <div className="mb-8">
+            <div className="flex items-center gap-2 mb-6">
+              <div className="w-6 h-6 bg-teal-600 text-white rounded-full flex items-center justify-center text-xs font-bold">3</div>
+              <h2 className="font-semibold text-gray-900">Enter your website details</h2>
+            </div>
+
+            <div className="bg-white border border-gray-200 rounded-xl p-6 space-y-5">
+              <div>
+                <label className="block text-gray-600 text-sm font-medium mb-2" htmlFor="site-name">Site Name (optional)</label>
+                <input
+                  id="site-name"
+                  type="text"
+                  value={siteName}
+                  onChange={e => setSiteName(e.target.value)}
+                  placeholder="My Awesome Project"
+                  className="w-full bg-gray-50 border border-gray-200 text-gray-900 px-4 py-2.5 rounded-lg text-sm focus:outline-none focus:border-teal-500 placeholder-gray-400 transition"
+                />
+              </div>
+              <div>
+                <label className="block text-gray-600 text-sm font-medium mb-2" htmlFor="site-url">Website URL</label>
+                <input
+                  id="site-url"
+                  type="url"
+                  value={url}
+                  onChange={e => setUrl(e.target.value)}
+                  placeholder="https://your-site.com"
+                  className={`w-full bg-gray-50 border text-gray-900 px-4 py-2.5 rounded-lg text-sm focus:outline-none placeholder-gray-400 transition ${urlError ? 'border-red-400 focus:border-red-500' : 'border-gray-200 focus:border-teal-500'}`}
+                />
+                {urlError && <p role="alert" className="text-red-500 text-xs mt-2">{urlError}</p>}
+                <p className="text-gray-400 text-xs mt-1.5">The crew will crawl this URL and all reachable sub-pages.</p>
+              </div>
+            </div>
+
+            <div className="flex gap-3 pt-4">
+              <button
+                onClick={() => setStep('analysis')}
+                className="flex-1 border border-gray-200 hover:border-gray-400 text-gray-700 hover:text-gray-900 px-5 py-2.5 rounded-lg text-sm font-medium transition"
+              >
+                Back
+              </button>
+              <button
+                onClick={handleStart}
+                disabled={!url || saving}
+                aria-busy={saving}
+                className="flex-1 flex items-center justify-center gap-2 bg-teal-600 hover:bg-teal-500 disabled:opacity-40 disabled:cursor-not-allowed text-white font-semibold px-6 py-2.5 rounded-lg text-sm transition"
+              >
+                <Play className="w-4 h-4" />
+                {saving ? 'Saving…' : 'Start Audit'}
+              </button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
