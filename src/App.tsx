@@ -11,27 +11,40 @@ import type { User } from '@supabase/supabase-js';
 
 let AUDIT_API = '';
 
-if (typeof window !== 'undefined') {
-  const sources = [];
+// Resolve the backend URL: build-time env var wins if present,
+// otherwise fetched at runtime from the get-config edge function.
+const _buildTimeUrl = import.meta.env.VITE_AUDIT_API_URL as string | undefined;
+if (_buildTimeUrl) {
+  AUDIT_API = _buildTimeUrl;
+  console.log('[SHIELD] AUDIT_API from build-time env:', AUDIT_API);
+}
 
-  const envVar = import.meta.env.VITE_AUDIT_API_URL;
-  if (envVar) {
-    AUDIT_API = envVar;
-    sources.push(`build-time env var (${AUDIT_API})`);
-  }
-
-  const runtimeVar = (window as any).__VITE_AUDIT_API_URL;
-  if (runtimeVar) {
-    AUDIT_API = runtimeVar;
-    sources.push(`runtime injection (${AUDIT_API})`);
-  }
-
-  if (!AUDIT_API) {
-    console.warn('[SHIELD] AUDIT_API not configured from any source');
-  } else {
-    console.log('[SHIELD] AUDIT_API loaded from:', sources.join(' or '));
+async function loadAuditApiUrl(): Promise<void> {
+  if (AUDIT_API) return; // already resolved at build time
+  try {
+    const supabaseUrl = import.meta.env.VITE_SUPABASE_URL as string;
+    const anonKey = import.meta.env.VITE_SUPABASE_ANON_KEY as string;
+    const res = await fetch(`${supabaseUrl}/functions/v1/get-config`, {
+      headers: { Authorization: `Bearer ${anonKey}` },
+    });
+    if (res.ok) {
+      const data = await res.json();
+      if (data.audit_api_url) {
+        AUDIT_API = data.audit_api_url;
+        console.log('[SHIELD] AUDIT_API loaded from edge function:', AUDIT_API);
+      } else {
+        console.warn('[SHIELD] get-config returned empty audit_api_url');
+      }
+    } else {
+      console.warn('[SHIELD] get-config fetch failed:', res.status);
+    }
+  } catch (err) {
+    console.warn('[SHIELD] get-config fetch error:', err);
   }
 }
+
+// Kick off the fetch immediately; AuditResultsPage awaits it before starting.
+const _auditApiReady = loadAuditApiUrl();
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -948,6 +961,9 @@ function AuditResultsPage({
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const startAudit = useCallback(async () => {
+    // Ensure the edge-function config fetch has completed before we check AUDIT_API
+    await _auditApiReady;
+
     console.log('[SHIELD] startAudit called with auditUrl:', auditUrl, 'AUDIT_API:', AUDIT_API);
 
     if (!auditUrl) {
@@ -957,8 +973,7 @@ function AuditResultsPage({
     }
 
     if (!AUDIT_API) {
-      console.error('[SHIELD] AUDIT_API not configured. VITE_AUDIT_API_URL environment variable is missing or empty.');
-      console.error('[SHIELD] Please set VITE_AUDIT_API_URL in your Bolt environment and redeploy.');
+      console.error('[SHIELD] AUDIT_API not configured. Set VITE_AUDIT_API_URL in Bolt secrets and redeploy.');
       setBackendUnavailable(true);
       return;
     }

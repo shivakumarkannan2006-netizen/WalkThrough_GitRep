@@ -4,6 +4,24 @@ from dotenv import load_dotenv
 
 load_dotenv()
 
+def _cors_origins() -> list:
+    # Allow override via env var (comma-separated list)
+    env_origins = os.getenv("CORS_ORIGINS", "")
+    if env_origins:
+        return [o.strip() for o in env_origins.split(",") if o.strip()]
+    return [
+        "http://localhost:3000",
+        "http://localhost:5173",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:5173",
+        # Bolt.new deployments
+        "https://shivakumarkannan2006-7m6f.bolt.new",
+        # Allow all bolt.new subdomains
+        "https://*.bolt.new",
+        # Allow all up.railway.app (for testing from Railway's preview)
+        "https://*.up.railway.app",
+    ]
+
 class Settings:
     """Core application settings"""
 
@@ -19,9 +37,9 @@ class Settings:
     BROWSERBASE_API_KEY: str = os.getenv("BROWSERBASE_API_KEY", "")
     BROWSERBASE_PROJECT_ID: str = os.getenv("BROWSERBASE_PROJECT_ID", "")
 
-    # Server
+    # Server — Railway injects PORT; fall back to 8000 for local dev
     SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
-    SERVER_PORT: int = int(os.getenv("SERVER_PORT", "8000"))
+    SERVER_PORT: int = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8000")))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Audit Thresholds
@@ -40,14 +58,8 @@ class Settings:
         "--disable-web-resources",
     ]
 
-    # CORS
-    CORS_ORIGINS: list = [
-        "http://localhost:3000",
-        "http://localhost:5173",
-        "http://127.0.0.1:3000",
-        "http://127.0.0.1:5173",
-        "https://shivakumarkannan2006-7m6f.bolt.new"
-    ]
+    # CORS — computed at import time so env vars are read fresh
+    CORS_ORIGINS: list = _cors_origins()
 
     # Feature Flags
     ENABLE_RAG_VAULT_COUNSEL: bool = True

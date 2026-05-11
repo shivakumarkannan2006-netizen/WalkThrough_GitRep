@@ -6,9 +6,10 @@ Main FastAPI application entry point
 import asyncio
 import logging
 import json
-from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Depends
+import re
+from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 from contextlib import asynccontextmanager
 import uuid
 from typing import Optional, List
@@ -28,13 +29,27 @@ active_websockets = {}
 
 settings = get_settings()
 
+# Wildcard-aware CORS origin checker
+_ALLOWED_PATTERNS = [
+    re.compile(r'^https?://localhost(:\d+)?$'),
+    re.compile(r'^https?://127\.0\.0\.1(:\d+)?$'),
+    re.compile(r'^https://[a-z0-9\-]+\.bolt\.new$'),
+    re.compile(r'^https://[a-z0-9\-]+\.up\.railway\.app$'),
+]
+_ALLOWED_EXACT = set(settings.CORS_ORIGINS)
+
+def _is_allowed_origin(origin: str) -> bool:
+    if origin in _ALLOWED_EXACT:
+        return True
+    return any(p.match(origin) for p in _ALLOWED_PATTERNS)
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """App lifecycle management"""
     logger.info("Shield Agent starting up...")
+    logger.info(f"Allowed CORS origins (exact): {settings.CORS_ORIGINS}")
     yield
     logger.info("Shield Agent shutting down...")
-    # Cleanup active sessions
     for session_id, session in active_sessions.items():
         try:
             await session.get("navigator", {}).close()
@@ -48,38 +63,61 @@ app = FastAPI(
     lifespan=lifespan
 )
 
-# CORS Configuration
+# Use allow_origins=["*"] so FastAPI doesn't reject anything at middleware level;
+# our custom middleware below enforces the actual allowlist including wildcard patterns.
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=settings.CORS_ORIGINS,
-    allow_credentials=True,
+    allow_origins=["*"],
+    allow_credentials=False,
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+@app.middleware("http")
+async def cors_override(request: Request, call_next):
+    """Replace the wildcard CORS header with the actual requesting origin when allowed."""
+    origin = request.headers.get("origin", "")
+    if request.method == "OPTIONS":
+        if origin and _is_allowed_origin(origin):
+            return Response(
+                status_code=200,
+                headers={
+                    "Access-Control-Allow-Origin": origin,
+                    "Access-Control-Allow-Credentials": "true",
+                    "Access-Control-Allow-Methods": "*",
+                    "Access-Control-Allow-Headers": "*",
+                    "Vary": "Origin",
+                },
+            )
+    response = await call_next(request)
+    if origin and _is_allowed_origin(origin):
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
+    return response
 
 # Initialize Supabase
 supabase = init_supabase()
 
 # ============== CORE AUDIT ENDPOINTS ==============
 
-@app.post("/api/start-audit")
-async def start_audit(
-    target_url: str,
-    company_id: str,
-    username: Optional[str] = None,
-    password: Optional[str] = None,
-    pdf_file_ids: Optional[List[str]] = None,
-):
-    """
-    Start a new web audit on target URL
+from pydantic import BaseModel
 
-    Args:
-        target_url: The website URL to audit
-        company_id: Company performing the audit
-        username: Optional credentials username
-        password: Optional credentials password
-        pdf_file_ids: Optional list of company document IDs for RAG
-    """
+class StartAuditRequest(BaseModel):
+    target_url: str
+    company_id: str
+    username: Optional[str] = None
+    password: Optional[str] = None
+    pdf_file_ids: Optional[List[str]] = None
+
+@app.post("/api/start-audit")
+async def start_audit(body: StartAuditRequest):
+    """Start a new web audit on target URL"""
+    target_url = body.target_url
+    company_id = body.company_id
+    username = body.username
+    password = body.password
+    pdf_file_ids = body.pdf_file_ids
     try:
         audit_session_id = str(uuid.uuid4())
 
