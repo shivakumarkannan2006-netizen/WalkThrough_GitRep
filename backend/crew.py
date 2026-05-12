@@ -31,6 +31,10 @@ class CrewOrchestrator:
 
     async def analyze_page(self, page_data: Dict):
         """Run all 6 crew agents in parallel on discovered page"""
+        if not self.supabase:
+            logger.error("CrewOrchestrator.analyze_page called with no Supabase client")
+            return
+
         try:
             url = page_data.get("url")
             audit_page_id = page_data.get("audit_page_id")

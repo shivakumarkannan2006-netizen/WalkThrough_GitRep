@@ -193,6 +193,8 @@ async def start_audit(body: StartAuditRequest):
 @app.get("/api/audit/{audit_session_id}/status")
 async def get_audit_status(audit_session_id: str):
     """Get current audit status"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         response = supabase.table("audit_sessions").select("*").eq("id", audit_session_id).execute()
 
@@ -219,6 +221,8 @@ async def get_audit_issues(
     page_url: Optional[str] = None,
 ):
     """Get issues for an audit session with optional filtering"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         query = supabase.table("audit_issues").select("*").eq("audit_session_id", audit_session_id)
 
@@ -238,6 +242,8 @@ async def get_audit_issues(
 @app.get("/api/audit/{audit_session_id}/pages")
 async def get_audit_pages(audit_session_id: str):
     """Get discovered pages for an audit session"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         response = supabase.table("audit_pages").select("*").eq("audit_session_id", audit_session_id).execute()
         return {"pages": response.data, "total": len(response.data)}
@@ -248,6 +254,8 @@ async def get_audit_pages(audit_session_id: str):
 @app.get("/api/audit/{audit_session_id}/report")
 async def get_audit_report(audit_session_id: str):
     """Get comprehensive audit report"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         # Fetch all data for report
         session = supabase.table("audit_sessions").select("*").eq("id", audit_session_id).execute()
@@ -286,6 +294,8 @@ async def upload_company_pdfs(
     document_types: Optional[List[str]] = None,
 ):
     """Upload company legal/policy PDFs for RAG pipeline"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         uploaded_files = []
         for file in files:
@@ -313,6 +323,8 @@ async def upload_company_pdfs(
 @app.get("/api/company/{company_id}/documents")
 async def get_company_documents(company_id: str):
     """Get uploaded documents for a company"""
+    if not supabase:
+        raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         response = supabase.table("company_documents").select("*").eq("company_id", company_id).execute()
         return {"documents": response.data}
