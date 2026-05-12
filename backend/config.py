@@ -14,6 +14,7 @@ def _cors_origins() -> list:
         "http://localhost:5173",
         "http://127.0.0.1:3000",
         "http://127.0.0.1:5173",
+        "https://bolt.new",
     ]
 
 class Settings:
@@ -44,12 +45,16 @@ class Settings:
     LOADING_STATE_THRESHOLD_MS: int = int(os.getenv("LOADING_STATE_THRESHOLD_MS", "300"))
     PERFORMANCE_BASELINE_THRESHOLD_MS: int = int(os.getenv("PERFORMANCE_BASELINE_THRESHOLD_MS", "2000"))
 
-    # Playwright
+    # Playwright — flags required for containerized/Railway environments
     PLAYWRIGHT_HEADLESS: bool = True
     PLAYWRIGHT_ARGS: list = [
-        "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
-        "--disable-web-resources",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",
+        "--disable-gpu",
+        "--disable-blink-features=AutomationControlled",
+        "--single-process",
+        "--no-zygote",
     ]
 
     # CORS — computed at import time so env vars are read fresh

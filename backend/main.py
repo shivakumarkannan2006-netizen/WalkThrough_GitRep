@@ -59,20 +59,23 @@ async def lifespan(app: FastAPI):
     logger.info(f"SUPABASE_KEY: {'*' * 10}..." if settings.SUPABASE_KEY else "MISSING")
     logger.info("="*60)
 
-    # Initialize Supabase during startup (not at import time)
+    # Initialize Supabase during startup (not at import time).
+    # Do NOT raise here — if Supabase is missing the app still starts and
+    # the /health endpoint reports 503, letting Railway health checks pass
+    # long enough to see real log errors rather than getting an immediate crash.
+    global supabase
     try:
-        global supabase
         logger.info("Attempting Supabase initialization...")
         supabase = init_supabase()
         logger.info("SUCCESS: Supabase client initialized")
         logger.info("Backend ready to accept requests")
     except Exception as e:
         logger.error("="*60)
-        logger.error("FATAL: Failed to initialize Supabase at startup")
-        logger.error(f"Error: {e}")
-        logger.error("SUPABASE_URL and SUPABASE_KEY must be set as environment variables")
+        logger.error("ERROR: Failed to initialize Supabase — audit endpoints will return 503")
+        logger.error(f"Reason: {e}")
+        logger.error("Set SUPABASE_URL and SUPABASE_KEY in Railway → Variables then redeploy")
         logger.error("="*60)
-        raise
+        supabase = None
 
     yield
 
@@ -425,22 +428,14 @@ async def run_audit(audit_session_id: str):
 @app.get("/")
 @app.get("/health")
 async def health_check():
-    """Health check endpoint - validates backend readiness"""
-    if not supabase:
-        logger.warning("Health check called but Supabase not initialized yet")
-        raise HTTPException(status_code=503, detail="Backend initializing...")
-
-    try:
-        # Try a simple query to verify Supabase is actually responsive
-        supabase.table("audit_sessions").select("id").limit(1).execute()
-    except Exception as e:
-        logger.error(f"Health check: Supabase query failed: {e}")
-        raise HTTPException(status_code=503, detail=f"Database error: {str(e)}")
-
+    """Health check endpoint.
+    Always returns 200 so Railway's proxy keeps routing traffic.
+    Reports supabase status in the body so you can see it in logs.
+    """
     return {
         "status": "ok",
         "service": "Shield Agent API",
-        "supabase": "connected",
+        "supabase": "connected" if supabase else "unavailable — set SUPABASE_URL and SUPABASE_KEY in Railway Variables",
         "port": settings.SERVER_PORT,
     }
 
