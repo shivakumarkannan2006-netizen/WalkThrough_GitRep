@@ -151,7 +151,7 @@ class ShieldNavigator:
             start_time = time.time()
 
             # Handle login if authenticated and not yet logged in
-            if authenticated and self.credentials and not self._is_logged_in(page):
+            if authenticated and self.credentials and not await self._is_logged_in(page):
                 await self._pseudo_login(page)
 
             # Navigate to URL with auto-wait
@@ -173,10 +173,8 @@ class ShieldNavigator:
                 "document.querySelector('meta[name=description]')?.getAttribute('content')"
             )
 
-            # Get HTTP status
-            http_status = page.url if page.url else 200
-
             # Store page snapshot in Supabase
+            audit_page_id = str(uuid.uuid4())  # default if DB insert fails
             try:
                 audit_page_response = self.supabase.table("audit_pages").insert({
                     "audit_session_id": self.audit_session_id,
@@ -191,7 +189,6 @@ class ShieldNavigator:
                 if audit_page_response.data:
                     audit_page_id = audit_page_response.data[0]["id"]
 
-                    # Store AXTree snapshot
                     self.supabase.table("audit_page_snapshots").insert({
                         "audit_page_id": audit_page_id,
                         "axe_tree_json": axe_tree or {},
@@ -202,7 +199,8 @@ class ShieldNavigator:
                 logger.error(f"Error storing page data: {e}")
 
             # Check for performance bottleneck
-            if load_time_ms > self.baseline_load_time + self.settings.PERFORMANCE_BASELINE_THRESHOLD_MS:
+            if self.baseline_load_time is not None and \
+                    load_time_ms > self.baseline_load_time + self.settings.PERFORMANCE_BASELINE_THRESHOLD_MS:
                 logger.warning(f"Performance bottleneck detected: {load_time_ms}ms vs baseline {self.baseline_load_time}ms")
                 try:
                     self.supabase.table("performance_bottlenecks").insert({
@@ -215,14 +213,23 @@ class ShieldNavigator:
                 except Exception as e:
                     logger.error(f"Error recording performance bottleneck: {e}")
 
+            # Extract AXTree snapshot and page content before page.close() is called
+            # by _traverse_bfs. Crew agents use this snapshot, not the live page object.
+            page_html = ""
+            try:
+                page_html = await page.content()
+            except Exception:
+                pass
+
             return {
-                "audit_page_id": audit_page_response.data[0]["id"] if audit_page_response.data else str(uuid.uuid4()),
+                "audit_page_id": audit_page_id,
                 "url": url,
                 "page_title": page_title,
                 "load_time_ms": load_time_ms,
                 "axe_tree": axe_tree,
                 "authenticated": authenticated,
-                "page_object": page,
+                "page_html": page_html,
+                # page_object intentionally omitted — page will be closed by caller
             }
 
         except Exception as e:
@@ -314,13 +321,12 @@ class ShieldNavigator:
         except Exception as e:
             logger.error(f"Login error: {e}")
 
-    def _is_logged_in(self, page: Page) -> bool:
+    async def _is_logged_in(self, page: Page) -> bool:
         """Check if already logged in"""
-        # Simple heuristic: look for logout button
         try:
-            logout_button = page.query_selector("button:has-text('Logout'), button:has-text('Sign Out'), a:has-text('Logout')")
+            logout_button = await page.query_selector("button:has-text('Logout'), button:has-text('Sign Out'), a:has-text('Logout')")
             return bool(logout_button)
-        except:
+        except Exception:
             return False
 
     def _normalize_url(self, url: str) -> str:

@@ -337,7 +337,7 @@ async def websocket_audit_stream(websocket: WebSocket, audit_session_id: str):
     except Exception as e:
         logger.error(f"WebSocket error: {e}")
     finally:
-        del active_websockets[audit_session_id]
+        active_websockets.pop(audit_session_id, None)
 
 async def broadcast_audit_update(audit_session_id: str, message: dict):
     """Broadcast update to all connected WebSocket clients"""
@@ -386,11 +386,12 @@ async def run_audit(audit_session_id: str):
             await orchestrator.analyze_page(page)
 
         # Update session as completed
-        supabase.table("audit_sessions").update({
-            "status": "completed",
-            "total_pages_discovered": len(pages),
-            "completed_at": "now()",
-        }).eq("id", audit_session_id).execute()
+        if supabase:
+            supabase.table("audit_sessions").update({
+                "status": "completed",
+                "total_pages_discovered": len(pages),
+                "completed_at": "now()",
+            }).eq("id", audit_session_id).execute()
 
         session_data["status"] = "completed"
         logger.info(f"Audit {audit_session_id} completed successfully")
@@ -404,9 +405,13 @@ async def run_audit(audit_session_id: str):
     except Exception as e:
         logger.error(f"Error running audit {audit_session_id}: {e}")
 
-        supabase.table("audit_sessions").update({
-            "status": "failed",
-        }).eq("id", audit_session_id).execute()
+        if supabase:
+            try:
+                supabase.table("audit_sessions").update({
+                    "status": "failed",
+                }).eq("id", audit_session_id).execute()
+            except Exception as db_err:
+                logger.error(f"Failed to mark audit as failed in DB: {db_err}")
 
         session_data["status"] = "failed"
 

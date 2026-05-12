@@ -10,6 +10,7 @@ from datetime import datetime
 import re
 import uuid
 
+from bs4 import BeautifulSoup
 from config import get_settings
 
 logger = logging.getLogger(__name__)
@@ -97,31 +98,31 @@ class GhostNavigator:
         try:
             url = page_data.get("url")
             axe_tree = page_data.get("axe_tree", {})
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: Form Loop-Holes
             logger.info(f"[Ghost] Checking form loop-holes for {url}")
-            form_issues = await self._check_form_loopholes(page_obj, url, audit_page_id)
+            form_issues = await self._check_form_loopholes(soup, url, audit_page_id)
             issues_found += len(form_issues)
 
             # Check 2: Deep Link Accuracy
             logger.info(f"[Ghost] Checking deep link accuracy for {url}")
-            anchor_issues = await self._check_deep_links(page_obj, url, audit_page_id)
+            anchor_issues = await self._check_deep_links(soup, url, audit_page_id)
             issues_found += len(anchor_issues)
 
             # Check 3: Orphaned States
             logger.info(f"[Ghost] Checking for orphaned states on {url}")
-            orphaned_issues = await self._check_orphaned_states(page_obj, url, audit_page_id, axe_tree)
+            orphaned_issues = await self._check_orphaned_states(soup, url, audit_page_id, axe_tree)
             issues_found += len(orphaned_issues)
 
             # Check 4: Back Button Paradox (simplified - would need session tracking)
             logger.info(f"[Ghost] Checking back button behavior on {url}")
-            back_issues = await self._check_back_button(page_obj, url, audit_page_id)
+            back_issues = await self._check_back_button(soup, url, audit_page_id)
             issues_found += len(back_issues)
 
             # Check 5: 404s and Broken Routes
             logger.info(f"[Ghost] Checking for 404s on {url}")
-            broken_issues = await self._check_broken_routes(page_obj, url, audit_page_id)
+            broken_issues = await self._check_broken_routes(soup, url, audit_page_id)
             issues_found += len(broken_issues)
 
             return {"agent": "ghost_navigator", "issues_found": issues_found}
@@ -130,64 +131,60 @@ class GhostNavigator:
             logger.error(f"Ghost Navigator error: {e}")
             return {"agent": "ghost_navigator", "issues_found": 0}
 
-    async def _check_form_loopholes(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_form_loopholes(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Test forms with edge cases"""
         issues = []
 
         try:
-            forms = await page.query_selector_all("form")
+            forms = soup.find_all("form")
 
             for form_idx, form in enumerate(forms):
                 form_selector = f"form:nth-of-type({form_idx + 1})"
 
                 # Get all inputs in form
-                inputs = await form.query_selector_all("input, textarea, select")
+                inputs = form.find_all(["input", "textarea", "select"])
 
-                for input_idx, inp in enumerate(inputs):
-                    input_type = await inp.get_attribute("type")
-                    input_name = await inp.get_attribute("name")
+                for inp in inputs:
+                    input_type = inp.get("type")
+                    input_name = inp.get("name")
 
-                    # Test 1: Spacebar-only submission
-                    if input_type != "submit":
-                        try:
-                            await inp.fill(" ")  # Just spacebar
-                            is_valid = await page.evaluate(
-                                f"document.querySelector('{form_selector}').checkValidity() === true"
-                            )
+                    # Test 1: Fields with no required attribute and no pattern validation
+                    if input_type != "submit" and input_type != "hidden":
+                        has_required = inp.get("required") is not None
+                        has_pattern = inp.get("pattern") is not None
+                        has_minlength = inp.get("minlength") is not None
 
-                            if not is_valid:
-                                issue_data = {
-                                    "agent_name": "Ghost Navigator",
-                                    "issue_category": "Logic & Reliability",
-                                    "specific_issue_detail": f"Form field accepts spacebar-only input without validation (field: {input_name})",
-                                    "severity": "medium",
-                                    "affected_url": url,
-                                    "affected_element_xpath": f"{form_selector} input[name='{input_name}']",
-                                }
-                                self.supabase.table("audit_issues").insert(issue_data).execute()
-                                issues.append(f"Spacebar-only validation on {input_name}")
-                        except Exception as e:
-                            logger.debug(f"Could not test spacebar validation: {e}")
+                        if not has_required and not has_pattern and not has_minlength:
+                            issue_data = {
+                                "agent_name": "Ghost Navigator",
+                                "issue_category": "Logic & Reliability",
+                                "specific_issue_detail": f"Form field accepts spacebar-only input without validation (field: {input_name})",
+                                "severity": "medium",
+                                "affected_url": url,
+                                "affected_element_xpath": f"{form_selector} input[name='{input_name}']",
+                            }
+                            self.supabase.table("audit_issues").insert(issue_data).execute()
+                            issues.append(f"Spacebar-only validation on {input_name}")
 
         except Exception as e:
             logger.error(f"Form loopholes check error: {e}")
 
         return issues
 
-    async def _check_deep_links(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_deep_links(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check if anchor links scroll to correct positions"""
         issues = []
 
         try:
-            anchors = await page.query_selector_all("a[href*='#']")
+            anchors = soup.find_all("a", href=True)
 
             for anchor in anchors:
-                href = await anchor.get_attribute("href")
+                href = anchor.get("href")
                 if href and href.startswith("#"):
                     anchor_id = href[1:]
 
-                    # Check if target exists
-                    target = await page.query_selector(f"#{anchor_id}, [id='{anchor_id}']")
+                    # Check if target exists in the document
+                    target = soup.find(id=anchor_id)
                     if not target:
                         issue_data = {
                             "agent_name": "Ghost Navigator",
@@ -205,17 +202,27 @@ class GhostNavigator:
 
         return issues
 
-    async def _check_orphaned_states(self, page, url: str, audit_page_id: str, axe_tree: Dict) -> List[str]:
+    async def _check_orphaned_states(self, soup: BeautifulSoup, url: str, audit_page_id: str, axe_tree: Dict) -> List[str]:
         """Check for orphaned states with no CTA"""
         issues = []
 
         try:
             # Check if page has navigation elements
-            nav_elements = await page.query_selector_all("nav, .navbar, [role='navigation'], a[href='/'], .logo")
+            nav_elements = (
+                soup.find_all("nav")
+                + soup.find_all(class_="navbar")
+                + soup.find_all(attrs={"role": "navigation"})
+                + soup.find_all("a", href="/")
+                + soup.find_all(class_="logo")
+            )
 
             if not nav_elements:
                 # Check for CTAs
-                ctas = await page.query_selector_all("a, button, [role='button']")
+                ctas = (
+                    soup.find_all("a")
+                    + soup.find_all("button")
+                    + soup.find_all(attrs={"role": "button"})
+                )
                 if len(ctas) == 0:
                     issue_data = {
                         "agent_name": "Ghost Navigator",
@@ -232,20 +239,19 @@ class GhostNavigator:
 
         return issues
 
-    async def _check_back_button(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_back_button(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Simplified back button check"""
         issues = []
         # Note: Full implementation would require session tracking across pages
         return issues
 
-    async def _check_broken_routes(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_broken_routes(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check for broken routes and 404s"""
         issues = []
 
         try:
-            # Check current page load status
-            status = page.url
-            if "404" in status or "error" in status.lower():
+            # Check current page load status based on URL
+            if "404" in url or "error" in url.lower():
                 issue_data = {
                     "agent_name": "Ghost Navigator",
                     "issue_category": "Logic & Reliability",
@@ -276,41 +282,41 @@ class MirrorStyleist:
 
         try:
             url = page_data.get("url")
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: Visual Contrast Failures
             logger.info(f"[Mirror] Checking contrast for {url}")
-            contrast_issues = await self._check_contrast(page_obj, url, audit_page_id)
+            contrast_issues = await self._check_contrast(soup, url, audit_page_id)
             issues_found += len(contrast_issues)
 
             # Check 2: Z-Index Collisions
             logger.info(f"[Mirror] Checking z-index collisions for {url}")
-            zindex_issues = await self._check_z_index_collisions(page_obj, url, audit_page_id)
+            zindex_issues = await self._check_z_index_collisions(soup, url, audit_page_id)
             issues_found += len(zindex_issues)
 
             # Check 3: Touch Target Density (mobile)
             logger.info(f"[Mirror] Checking touch targets for {url}")
-            touch_issues = await self._check_touch_targets(page_obj, url, audit_page_id)
+            touch_issues = await self._check_touch_targets(soup, url, audit_page_id)
             issues_found += len(touch_issues)
 
             # Check 4: Horizontal Scroll Bugs
             logger.info(f"[Mirror] Checking for horizontal scroll bugs on {url}")
-            scroll_issues = await self._check_horizontal_scroll(page_obj, url, audit_page_id)
+            scroll_issues = await self._check_horizontal_scroll(soup, url, audit_page_id)
             issues_found += len(scroll_issues)
 
             # Check 5: Font Jump (FOUT)
             logger.info(f"[Mirror] Checking for font jumps on {url}")
-            font_issues = await self._check_font_jumps(page_obj, url, audit_page_id)
+            font_issues = await self._check_font_jumps(soup, url, audit_page_id)
             issues_found += len(font_issues)
 
             # Check 6: Mobile Integrity
             logger.info(f"[Mirror] Checking mobile integrity on {url}")
-            mobile_issues = await self._check_mobile_integrity(page_obj, url, audit_page_id)
+            mobile_issues = await self._check_mobile_integrity(soup, url, audit_page_id)
             issues_found += len(mobile_issues)
 
             # Check 7: General Polish
             logger.info(f"[Mirror] Checking general polish on {url}")
-            polish_issues = await self._check_general_polish(page_obj, url, audit_page_id)
+            polish_issues = await self._check_general_polish(soup, url, audit_page_id)
             issues_found += len(polish_issues)
 
             return {"agent": "mirror_stylist", "issues_found": issues_found}
@@ -319,27 +325,30 @@ class MirrorStyleist:
             logger.error(f"Mirror Stylist error: {e}")
             return {"agent": "mirror_stylist", "issues_found": 0}
 
-    async def _check_contrast(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check for low contrast text"""
+    async def _check_contrast(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check for low contrast text via inline styles"""
         issues = []
 
         try:
-            # Get all text elements
-            text_elements = await page.query_selector_all("p, h1, h2, h3, h4, h5, h6, span, a, button, label")
+            # Get text elements that have inline style attributes
+            text_elements = soup.find_all(
+                ["p", "h1", "h2", "h3", "h4", "h5", "h6", "span", "a", "button", "label"],
+                style=True
+            )
 
             for elem in text_elements[:20]:  # Sample limit
                 try:
-                    computed_style = await page.evaluate(
-                        f"window.getComputedStyle(arguments[0])",
-                        elem
-                    )
+                    style = elem.get("style", "")
 
-                    # Extract color values (simplified)
-                    color = computed_style.get("color", "")
-                    bg_color = computed_style.get("backgroundColor", "")
+                    # Extract color and background-color from inline styles
+                    color_match = re.search(r'(?<!\w)color\s*:\s*([^;]+)', style, re.IGNORECASE)
+                    bg_match = re.search(r'background-color\s*:\s*([^;]+)', style, re.IGNORECASE)
 
-                    if color and bg_color:
-                        # Flag low contrast (very simplified check)
+                    if color_match and bg_match:
+                        color = color_match.group(1).strip()
+                        bg_color = bg_match.group(1).strip()
+
+                        # Flag low contrast (very simplified check - both white-ish)
                         if "rgb(255" in color and "rgb(255" in bg_color:
                             issue_data = {
                                 "agent_name": "Mirror Stylist",
@@ -359,26 +368,27 @@ class MirrorStyleist:
 
         return issues
 
-    async def _check_z_index_collisions(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check for z-index stacking issues"""
+    async def _check_z_index_collisions(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check for z-index stacking issues via inline styles"""
         issues = []
 
         try:
-            # Get all elements with z-index
-            z_indexed = await page.evaluate("""
-                Array.from(document.querySelectorAll('*')).filter(el => {
-                    const zIndex = window.getComputedStyle(el).zIndex;
-                    return zIndex !== 'auto' && zIndex !== '0';
-                }).map(el => ({
-                    selector: el.tagName,
-                    zIndex: window.getComputedStyle(el).zIndex,
-                    classes: el.className
-                })).slice(0, 20)
-            """)
+            # Find all elements with inline style containing z-index
+            styled_elements = soup.find_all(style=True)
 
-            if len(z_indexed) > 1:
-                # Check for overlaps (simplified)
-                zs = sorted([int(el["zIndex"]) for el in z_indexed if el["zIndex"].isdigit()])
+            z_values = []
+            for elem in styled_elements:
+                style = elem.get("style", "")
+                z_match = re.search(r'z-index\s*:\s*(\d+)', style, re.IGNORECASE)
+                if z_match:
+                    z_val = int(z_match.group(1))
+                    if z_val != 0:
+                        z_values.append(z_val)
+
+            z_values = z_values[:20]
+
+            if len(z_values) > 1:
+                zs = sorted(z_values)
                 if len(zs) > 0 and max(zs) > 1000:
                     issue_data = {
                         "agent_name": "Mirror Stylist",
@@ -395,89 +405,45 @@ class MirrorStyleist:
 
         return issues
 
-    async def _check_touch_targets(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check mobile touch target sizes"""
+    async def _check_touch_targets(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check mobile touch target sizes - cannot be done statically, skip"""
+        # Bounding box measurements require a live rendered page; not available from HTML alone
+        return []
+
+    async def _check_horizontal_scroll(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check for horizontal scroll overflow - cannot be done statically, skip"""
+        # scrollWidth / window.innerWidth require a live rendered page
+        return []
+
+    async def _check_font_jumps(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check for Flash of Unstyled Text (FOUT) via link/style tags"""
         issues = []
 
         try:
-            # Set mobile viewport
-            await page.set_viewport_size({"width": 375, "height": 667})
+            has_custom_fonts = False
 
-            buttons = await page.query_selector_all("button, a, [role='button']")
+            # Check for Google Fonts link tags
+            link_tags = soup.find_all("link", href=True)
+            for link in link_tags:
+                href = link.get("href", "")
+                if "fonts.googleapis.com" in href or "fonts.gstatic.com" in href:
+                    has_custom_fonts = True
+                    break
 
-            for btn in buttons[:10]:
-                try:
-                    box = await btn.bounding_box()
-                    if box:
-                        width = box["width"]
-                        height = box["height"]
+            # Check for @font-face in <style> tags
+            if not has_custom_fonts:
+                style_tags = soup.find_all("style")
+                for style_tag in style_tags:
+                    style_text = style_tag.get_text()
+                    if "@font-face" in style_text:
+                        has_custom_fonts = True
+                        break
 
-                        if width < 48 or height < 48:
-                            issue_data = {
-                                "agent_name": "Mirror Stylist",
-                                "issue_category": "Aesthetics & UX",
-                                "specific_issue_detail": f"Touch target too small: {width}x{height}px (minimum 48x48px)",
-                                "severity": "medium",
-                                "affected_url": url,
-                            }
-                            self.supabase.table("audit_issues").insert(issue_data).execute()
-                            issues.append(f"Small touch target: {width}x{height}")
-
-                except Exception as e:
-                    logger.debug(f"Could not measure touch target: {e}")
-
-        except Exception as e:
-            logger.error(f"Touch targets check error: {e}")
-
-        return issues
-
-    async def _check_horizontal_scroll(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check for horizontal scroll overflow"""
-        issues = []
-
-        try:
-            scroll_width = await page.evaluate("document.documentElement.scrollWidth")
-            window_width = await page.evaluate("window.innerWidth")
-
-            if scroll_width > window_width:
+            if has_custom_fonts:
                 issue_data = {
                     "agent_name": "Mirror Stylist",
                     "issue_category": "Aesthetics & UX",
-                    "specific_issue_detail": f"Horizontal scroll detected: content wider than viewport ({scroll_width}px > {window_width}px)",
-                    "severity": "medium",
-                    "affected_url": url,
-                }
-                self.supabase.table("audit_issues").insert(issue_data).execute()
-                issues.append(f"Horizontal scroll: {scroll_width}px > {window_width}px")
-
-        except Exception as e:
-            logger.error(f"Horizontal scroll check error: {e}")
-
-        return issues
-
-    async def _check_font_jumps(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check for Flash of Unstyled Text (FOUT)"""
-        issues = []
-
-        try:
-            # Check for @font-face declarations
-            fonts = await page.evaluate("""
-                Array.from(document.styleSheets).filter(sheet => {
-                    try {
-                        return sheet.cssRules;
-                    } catch {
-                        return false;
-                    }
-                }).flatMap(sheet => Array.from(sheet.cssRules))
-                .filter(rule => rule.type === 5)
-                .slice(0, 5);
-            """)
-
-            if fonts:
-                issue_data = {
-                    "agent_name": "Mirror Stylist",
-                    "issue_category": "Aesthetics & UX",
-                    "specific_issue_detail": f"Custom fonts detected - potential FOUT (Flash of Unstyled Text) detected. Ensure font-display is optimized.",
+                    "specific_issue_detail": "Custom fonts detected - potential FOUT (Flash of Unstyled Text) detected. Ensure font-display is optimized.",
                     "severity": "low",
                     "affected_url": url,
                 }
@@ -489,35 +455,18 @@ class MirrorStyleist:
 
         return issues
 
-    async def _check_mobile_integrity(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check mobile-specific issues"""
-        issues = []
+    async def _check_mobile_integrity(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check mobile-specific issues - cannot be done statically, skip"""
+        # Focus/blur interactions and layout shift require a live rendered page
+        return []
 
-        try:
-            # Already set mobile viewport above
-            # Check for keyboard overlap by focusing input
-            inputs = await page.query_selector_all("input")
-
-            for inp in inputs[:5]:
-                try:
-                    await inp.focus()
-                    # In real scenario, would measure layout shift
-                    await inp.blur()
-                except Exception as e:
-                    logger.debug(f"Could not test input focus: {e}")
-
-        except Exception as e:
-            logger.error(f"Mobile integrity check error: {e}")
-
-        return issues
-
-    async def _check_general_polish(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_general_polish(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check for general polish issues like typos, placeholder text"""
         issues = []
 
         try:
             # Get all text content
-            text_content = await page.text_content()
+            text_content = soup.get_text(separator=" ", strip=True)
 
             if text_content:
                 # Check for common placeholder/debug text
@@ -555,31 +504,31 @@ class VaultCounsel:
 
         try:
             url = page_data.get("url")
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: GDPR/Legal Compliance
             logger.info(f"[Vault] Checking GDPR compliance on {url}")
-            gdpr_issues = await self._check_gdpr_compliance(page_obj, url, audit_page_id)
+            gdpr_issues = await self._check_gdpr_compliance(soup, url, audit_page_id)
             issues_found += len(gdpr_issues)
 
             # Check 2: Cookie Consent
             logger.info(f"[Vault] Checking cookie consent on {url}")
-            cookie_issues = await self._check_cookie_consent(page_obj, url, audit_page_id)
+            cookie_issues = await self._check_cookie_consent(soup, url, audit_page_id)
             issues_found += len(cookie_issues)
 
             # Check 3: Pricing Consistency
             logger.info(f"[Vault] Checking pricing consistency on {url}")
-            pricing_issues = await self._check_pricing_consistency(page_obj, url, audit_page_id)
+            pricing_issues = await self._check_pricing_consistency(soup, url, audit_page_id)
             issues_found += len(pricing_issues)
 
             # Check 4: Contact Info Consistency
             logger.info(f"[Vault] Checking contact info on {url}")
-            contact_issues = await self._check_contact_info(page_obj, url, audit_page_id)
+            contact_issues = await self._check_contact_info(soup, url, audit_page_id)
             issues_found += len(contact_issues)
 
             # Check 5: Dark Pattern Detection
             logger.info(f"[Vault] Checking for dark patterns on {url}")
-            dark_issues = await self._check_dark_patterns(page_obj, url, audit_page_id)
+            dark_issues = await self._check_dark_patterns(soup, url, audit_page_id)
             issues_found += len(dark_issues)
 
             return {"agent": "vault_counsel", "issues_found": issues_found}
@@ -588,12 +537,12 @@ class VaultCounsel:
             logger.error(f"Vault Counsel error: {e}")
             return {"agent": "vault_counsel", "issues_found": 0}
 
-    async def _check_gdpr_compliance(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_gdpr_compliance(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check GDPR compliance"""
         issues = []
 
         try:
-            page_text = await page.text_content()
+            page_text = soup.get_text(separator=" ", strip=True)
 
             # Check for GDPR-related keywords
             gdpr_keywords = ["GDPR", "personal data", "privacy", "consent", "processing"]
@@ -621,43 +570,52 @@ class VaultCounsel:
 
         return issues
 
-    async def _check_cookie_consent(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_cookie_consent(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check cookie consent banners"""
         issues = []
 
         try:
-            # Look for cookie banner
-            cookie_banner = await page.query_selector("[role='dialog']:has-text('cookie'), .cookie-banner, .consent-banner")
+            # Look for cookie banner elements in the HTML
+            cookie_banner = (
+                soup.find(class_="cookie-banner")
+                or soup.find(class_="consent-banner")
+                or soup.find(attrs={"role": "dialog"})
+            )
 
             if cookie_banner:
-                # Check if cookies are set before consent
-                cookies = await page.context.cookies()
-                tracking_cookies = [c for c in cookies if any(x in c.get("name", "").lower() for x in ["ga", "facebook", "analytics"])]
+                banner_text = cookie_banner.get_text(strip=True).lower()
+                if "cookie" in banner_text or "consent" in banner_text:
+                    # Check for tracking scripts loaded unconditionally
+                    scripts = soup.find_all("script", src=True)
+                    tracking_scripts = [
+                        s for s in scripts
+                        if any(x in (s.get("src") or "").lower() for x in ["ga.", "gtag", "analytics", "facebook", "fbq"])
+                    ]
 
-                if tracking_cookies:
-                    for cookie in tracking_cookies:
+                    for script in tracking_scripts:
+                        script_src = script.get("src", "")
                         issue_data = {
                             "agent_name": "Vault Counsel",
                             "issue_category": "Compliance & Integrity",
-                            "specific_issue_detail": f"Tracking cookie set before consent: {cookie['name']}",
+                            "specific_issue_detail": f"Tracking script loaded before consent may be present: {script_src}",
                             "severity": "critical",
                             "affected_url": url,
                         }
                         self.supabase.table("audit_issues").insert(issue_data).execute()
-                        issues.append(f"Tracking cookie pre-set: {cookie['name']}")
+                        issues.append(f"Tracking script pre-loaded: {script_src}")
 
         except Exception as e:
             logger.error(f"Cookie consent check error: {e}")
 
         return issues
 
-    async def _check_pricing_consistency(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_pricing_consistency(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check for pricing inconsistencies"""
         issues = []
 
         try:
             # Extract prices using regex
-            page_text = await page.text_content()
+            page_text = soup.get_text(separator=" ", strip=True)
             prices = re.findall(r'\$[\d,]+\.?\d*', page_text)
 
             if prices:
@@ -671,13 +629,13 @@ class VaultCounsel:
 
         return issues
 
-    async def _check_contact_info(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_contact_info(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check contact information consistency"""
         issues = []
 
         try:
             # Extract emails
-            page_text = await page.text_content()
+            page_text = soup.get_text(separator=" ", strip=True)
             emails = re.findall(r'[\w\.-]+@[\w\.-]+\.\w+', page_text)
 
             if len(set(emails)) > 1:
@@ -696,26 +654,28 @@ class VaultCounsel:
 
         return issues
 
-    async def _check_dark_patterns(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_dark_patterns(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Detect dark patterns in UI"""
         issues = []
 
         try:
-            # Look for misleading button sizes
-            buttons = await page.query_selector_all("button, a[role='button']")
+            # Look for misleading button text (bounding box not available; check by text alone)
+            buttons = soup.find_all("button") + soup.find_all("a", attrs={"role": "button"})
 
             for btn in buttons[:20]:
                 try:
-                    text = await btn.text_content()
-                    box = await btn.bounding_box()
+                    text = btn.get_text(strip=True)
 
-                    if box and ("cancel" in text.lower() or "no" in text.lower()):
-                        # Check if cancel button is smaller than confirm
-                        if box["width"] < 80 or box["height"] < 40:
+                    if text and ("cancel" in text.lower() or "no" in text.lower()):
+                        # Without bounding box, flag any cancel/no button that has
+                        # visually-diminishing inline styles (e.g. very small font-size)
+                        style = btn.get("style", "")
+                        font_size_match = re.search(r'font-size\s*:\s*([\d.]+)px', style, re.IGNORECASE)
+                        if font_size_match and float(font_size_match.group(1)) < 12:
                             issue_data = {
                                 "agent_name": "Vault Counsel",
                                 "issue_category": "Compliance & Integrity",
-                                "specific_issue_detail": f"Possible dark pattern: '{text}' button is {box['width']}x{box['height']}px (small for rejection action)",
+                                "specific_issue_detail": f"Possible dark pattern: '{text}' button has very small font size (rejection action de-emphasized)",
                                 "severity": "medium",
                                 "affected_url": url,
                             }
@@ -745,16 +705,16 @@ class FactChecker:
 
         try:
             url = page_data.get("url")
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: External Link Verification
             logger.info(f"[Fact] Verifying external links on {url}")
-            link_issues = await self._verify_external_links(page_obj, url, audit_page_id)
+            link_issues = await self._verify_external_links(soup, url, audit_page_id)
             issues_found += len(link_issues)
 
             # Check 2: Testimonial Audit
             logger.info(f"[Fact] Auditing testimonials on {url}")
-            testimonial_issues = await self._audit_testimonials(page_obj, url, audit_page_id)
+            testimonial_issues = await self._audit_testimonials(soup, url, audit_page_id)
             issues_found += len(testimonial_issues)
 
             return {"agent": "fact_checker", "issues_found": issues_found}
@@ -763,16 +723,17 @@ class FactChecker:
             logger.error(f"Fact Checker error: {e}")
             return {"agent": "fact_checker", "issues_found": 0}
 
-    async def _verify_external_links(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _verify_external_links(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Verify all external links are reachable"""
         issues = []
 
         try:
-            links = await page.query_selector_all("a[href^='http']")
+            links = soup.find_all("a", href=True)
+            external_links = [a for a in links if (a.get("href") or "").startswith("http")]
 
-            for link in links[:20]:  # Limit to avoid timeout
+            for link in external_links[:20]:  # Limit to avoid timeout
                 try:
-                    href = await link.get_attribute("href")
+                    href = link.get("href")
 
                     # Record link for verification
                     if href and not href.startswith(url):
@@ -791,17 +752,22 @@ class FactChecker:
 
         return issues
 
-    async def _audit_testimonials(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _audit_testimonials(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check for AI-generated or fake testimonials"""
         issues = []
 
         try:
             # Look for testimonial elements
-            testimonials = await page.query_selector_all("[role='blockquote'], .testimonial, .quote, [class*='testimonial']")
+            testimonials = (
+                soup.find_all(attrs={"role": "blockquote"})
+                + soup.find_all(class_="testimonial")
+                + soup.find_all(class_="quote")
+                + [el for el in soup.find_all(class_=True) if any("testimonial" in c for c in el.get("class", []))]
+            )
 
             for testimonial in testimonials[:5]:
                 try:
-                    text = await testimonial.text_content()
+                    text = testimonial.get_text(strip=True)
 
                     # Simple AI detection heuristics
                     ai_patterns = [
@@ -856,21 +822,21 @@ class FortressSentry:
 
         try:
             url = page_data.get("url")
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: Console Log Leaks
             logger.info(f"[Fortress] Checking console for leaks on {url}")
-            console_issues = await self._check_console_leaks(page_obj, url, audit_page_id)
+            console_issues = await self._check_console_leaks(soup, url, audit_page_id)
             issues_found += len(console_issues)
 
             # Check 2: Sensitive Data Masking
             logger.info(f"[Fortress] Checking input masking on {url}")
-            masking_issues = await self._check_sensitive_masking(page_obj, url, audit_page_id)
+            masking_issues = await self._check_sensitive_masking(soup, url, audit_page_id)
             issues_found += len(masking_issues)
 
             # Check 3: EXIF Metadata
             logger.info(f"[Fortress] Checking image EXIF data on {url}")
-            exif_issues = await self._check_image_exif(page_obj, url, audit_page_id)
+            exif_issues = await self._check_image_exif(soup, url, audit_page_id)
             issues_found += len(exif_issues)
 
             return {"agent": "fortress_sentry", "issues_found": issues_found}
@@ -879,25 +845,12 @@ class FortressSentry:
             logger.error(f"Fortress Sentry error: {e}")
             return {"agent": "fortress_sentry", "issues_found": 0}
 
-    async def _check_console_leaks(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Monitor console for API key leaks and errors"""
+    async def _check_console_leaks(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Scan inline scripts for potential secret leaks"""
         issues = []
-        console_messages = []
-
-        def on_console(msg):
-            console_messages.append({
-                "type": msg.type,
-                "text": msg.text,
-                "location": msg.location,
-            })
-
-        page.on("console", on_console)
 
         try:
-            # Trigger console activity by navigating
-            await page.wait_for_load_state("networkidle")
-
-            # Check for secrets
+            # Scan all inline <script> tags for secret patterns
             secret_patterns = {
                 "api_key": r"api[_-]?key\s*[:=]",
                 "jwt": r"JWT|Bearer\s+[a-zA-Z0-9\-_.]+",
@@ -905,13 +858,17 @@ class FortressSentry:
                 "db_url": r"(postgres|mysql|mongodb)://",
             }
 
-            for msg in console_messages:
+            inline_scripts = soup.find_all("script", src=False)
+
+            for script_tag in inline_scripts:
+                script_text = script_tag.get_text()
                 for pattern_name, pattern in secret_patterns.items():
-                    if re.search(pattern, msg["text"], re.IGNORECASE):
+                    if re.search(pattern, script_text, re.IGNORECASE):
+                        snippet = script_text[:100].strip()
                         issue_data = {
                             "agent_name": "Fortress Sentry",
                             "issue_category": "Privacy & Security",
-                            "specific_issue_detail": f"Potential {pattern_name} leak in console: {msg['text'][:100]}",
+                            "specific_issue_detail": f"Potential {pattern_name} leak in inline script: {snippet}",
                             "severity": "critical",
                             "affected_url": url,
                         }
@@ -919,9 +876,9 @@ class FortressSentry:
                         self.supabase.table("security_console_leaks").insert({
                             "audit_session_id": self.audit_session_id,
                             "page_url": url,
-                            "console_message_type": msg["type"],
+                            "console_message_type": "inline_script",
                             "detected_pattern_type": pattern_name,
-                            "message_text": msg["text"][:500],
+                            "message_text": script_text[:500],
                             "severity": "critical",
                         }).execute()
                         issues.append(f"Console leak: {pattern_name}")
@@ -931,53 +888,70 @@ class FortressSentry:
 
         return issues
 
-    async def _check_sensitive_masking(self, page, url: str, audit_page_id: str) -> List[str]:
-        """Check if password fields are properly masked"""
+    async def _check_sensitive_masking(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
+        """Check if password fields are properly declared as type=password"""
         issues = []
 
         try:
-            password_fields = await page.query_selector_all("input[type='password']")
+            # Find all inputs that may collect sensitive data
+            password_fields = soup.find_all("input", attrs={"type": "password"})
 
             for field in password_fields[:5]:
                 try:
-                    # Type test value
-                    await field.fill("testpassword123")
+                    # In static HTML we can verify the type attribute is present and correct.
+                    # If a field's name/id suggests a password but type is not 'password', flag it.
+                    field_name = (field.get("name") or field.get("id") or "").lower()
+                    field_type = (field.get("type") or "").lower()
 
-                    # Check displayed value (should be masked)
-                    displayed_value = await field.input_value()
-
-                    if "testpassword" in displayed_value:
+                    # The field was already selected as type=password, so type is correct here.
+                    # Check for autocomplete="off" which can be a security concern on password fields
+                    autocomplete = (field.get("autocomplete") or "").lower()
+                    if autocomplete == "off":
                         issue_data = {
                             "agent_name": "Fortress Sentry",
                             "issue_category": "Privacy & Security",
-                            "specific_issue_detail": "Password field not properly masked - plaintext visible while typing",
-                            "severity": "critical",
+                            "specific_issue_detail": "Password field has autocomplete='off' which may impede password manager usage",
+                            "severity": "low",
                             "affected_url": url,
                         }
                         self.supabase.table("audit_issues").insert(issue_data).execute()
-                        issues.append("Password not masked")
-
-                    await field.clear()
+                        issues.append("Password autocomplete disabled")
 
                 except Exception as e:
                     logger.debug(f"Could not test masking: {e}")
+
+            # Also check: inputs with password-related names that are NOT type=password
+            all_inputs = soup.find_all("input")
+            for inp in all_inputs:
+                name = (inp.get("name") or inp.get("id") or inp.get("placeholder") or "").lower()
+                inp_type = (inp.get("type") or "text").lower()
+                if any(kw in name for kw in ["password", "passwd", "secret", "pin"]) and inp_type != "password":
+                    issue_data = {
+                        "agent_name": "Fortress Sentry",
+                        "issue_category": "Privacy & Security",
+                        "specific_issue_detail": "Password field not properly masked - plaintext visible while typing",
+                        "severity": "critical",
+                        "affected_url": url,
+                    }
+                    self.supabase.table("audit_issues").insert(issue_data).execute()
+                    issues.append("Password not masked")
 
         except Exception as e:
             logger.error(f"Masking check error: {e}")
 
         return issues
 
-    async def _check_image_exif(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_image_exif(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check images for EXIF metadata"""
         issues = []
 
         try:
             # Get all images
-            images = await page.query_selector_all("img")
+            images = soup.find_all("img")
 
             for img in images[:5]:  # Limit for performance
                 try:
-                    src = await img.get_attribute("src")
+                    src = img.get("src")
                     if src and src.startswith("http"):
                         # Record for EXIF analysis (would need image download in production)
                         self.supabase.table("security_exif_findings").insert({
@@ -1011,26 +985,26 @@ class VisionArchitect:
 
         try:
             url = page_data.get("url")
-            page_obj = page_data.get("page_object")
+            soup = BeautifulSoup(page_data.get("page_html", ""), "html.parser")
 
             # Check 1: Empty State Analysis
             logger.info(f"[Vision] Checking for empty states on {url}")
-            empty_issues = await self._check_empty_states(page_obj, url, audit_page_id)
+            empty_issues = await self._check_empty_states(soup, url, audit_page_id)
             issues_found += len(empty_issues)
 
             # Check 2: Reading Level Audit
             logger.info(f"[Vision] Analyzing reading level on {url}")
-            reading_issues = await self._check_reading_level(page_obj, url, audit_page_id)
+            reading_issues = await self._check_reading_level(soup, url, audit_page_id)
             issues_found += len(reading_issues)
 
             # Check 3: Tone Consistency
             logger.info(f"[Vision] Checking tone consistency on {url}")
-            tone_issues = await self._check_tone_consistency(page_obj, url, audit_page_id)
+            tone_issues = await self._check_tone_consistency(soup, url, audit_page_id)
             issues_found += len(tone_issues)
 
             # Check 4: Enhancement Strategies
             logger.info(f"[Vision] Generating enhancement strategies for {url}")
-            enhancement_issues = await self._generate_enhancements(page_obj, url, audit_page_id)
+            enhancement_issues = await self._generate_enhancements(soup, url, audit_page_id)
             issues_found += len(enhancement_issues)
 
             return {"agent": "vision_architect", "issues_found": issues_found}
@@ -1039,17 +1013,17 @@ class VisionArchitect:
             logger.error(f"Vision Architect error: {e}")
             return {"agent": "vision_architect", "issues_found": 0}
 
-    async def _check_empty_states(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_empty_states(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check for unmotivating empty states"""
         issues = []
 
         try:
-            page_text = await page.text_content()
+            page_text = soup.get_text(separator=" ", strip=True)
 
             # Check if page looks empty
             if len(page_text.strip()) < 200:
                 # Check for CTAs
-                buttons = await page.query_selector_all("button, a[role='button']")
+                buttons = soup.find_all("button") + soup.find_all("a", attrs={"role": "button"})
 
                 if len(buttons) == 0:
                     issue_data = {
@@ -1067,19 +1041,19 @@ class VisionArchitect:
 
         return issues
 
-    async def _check_reading_level(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_reading_level(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check reading level and AI-sounding text"""
         issues = []
 
         try:
-            # Get body text
-            paragraphs = await page.query_selector_all("p, h1, h2, h3")
+            # Get body text paragraphs and headings
+            paragraphs = soup.find_all(["p", "h1", "h2", "h3"])
 
             ai_patterns = ["innovative", "cutting-edge", "revolutionary", "synergy", "paradigm", "leverage"]
 
             for para in paragraphs[:5]:
                 try:
-                    text = await para.text_content()
+                    text = para.get_text(strip=True)
 
                     ai_score = sum(1 for pattern in ai_patterns if pattern.lower() in text.lower()) * 20
 
@@ -1110,19 +1084,19 @@ class VisionArchitect:
 
         return issues
 
-    async def _check_tone_consistency(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _check_tone_consistency(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Check tone consistency across page sections"""
         issues = []
 
         try:
             # Get sections
-            headers = await page.query_selector_all("h1, h2, h3")
+            headers = soup.find_all(["h1", "h2", "h3"])
 
             tones_detected = []
 
             for header in headers[:3]:
                 try:
-                    text = await header.text_content()
+                    text = header.get_text(strip=True)
 
                     # Classify tone (very simplified)
                     if any(word in text.lower() for word in ["free", "save", "limited", "now"]):
@@ -1163,13 +1137,13 @@ class VisionArchitect:
 
         return issues
 
-    async def _generate_enhancements(self, page, url: str, audit_page_id: str) -> List[str]:
+    async def _generate_enhancements(self, soup: BeautifulSoup, url: str, audit_page_id: str) -> List[str]:
         """Generate psychology-based enhancement recommendations"""
         issues = []
 
         try:
             # Check for images
-            images = await page.query_selector_all("img")
+            images = soup.find_all("img")
 
             if len(images) < 3:
                 enhancement_data = {
@@ -1185,7 +1159,10 @@ class VisionArchitect:
                 issues.append("Consider adding visual content")
 
             # Check for social proof
-            testimonials = await page.query_selector_all("[role='blockquote'], .testimonial")
+            testimonials = (
+                soup.find_all(attrs={"role": "blockquote"})
+                + soup.find_all(class_="testimonial")
+            )
 
             if len(testimonials) == 0:
                 enhancement_data = {
