@@ -52,18 +52,26 @@ def _is_allowed_origin(origin: str) -> bool:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """App lifecycle management"""
+    logger.info("="*60)
     logger.info("Shield Agent starting up...")
-    logger.info(f"Server host: {settings.SERVER_HOST}:{settings.SERVER_PORT}")
-    logger.info(f"Allowed CORS origins: {settings.CORS_ORIGINS}")
+    logger.info(f"Server: {settings.SERVER_HOST}:{settings.SERVER_PORT}")
+    logger.info(f"SUPABASE_URL: {settings.SUPABASE_URL[:50]}..." if settings.SUPABASE_URL else "MISSING")
+    logger.info(f"SUPABASE_KEY: {'*' * 10}..." if settings.SUPABASE_KEY else "MISSING")
+    logger.info("="*60)
 
     # Initialize Supabase during startup (not at import time)
     try:
         global supabase
+        logger.info("Attempting Supabase initialization...")
         supabase = init_supabase()
+        logger.info("SUCCESS: Supabase client initialized")
         logger.info("Backend ready to accept requests")
     except Exception as e:
-        logger.error(f"Failed to initialize Supabase at startup: {e}")
-        logger.error("Backend will not function without Supabase. Check environment variables.")
+        logger.error("="*60)
+        logger.error("FATAL: Failed to initialize Supabase at startup")
+        logger.error(f"Error: {e}")
+        logger.error("SUPABASE_URL and SUPABASE_KEY must be set as environment variables")
+        logger.error("="*60)
         raise
 
     yield
@@ -414,12 +422,20 @@ async def run_audit(audit_session_id: str):
 
 # ============== HEALTH CHECK ==============
 
+@app.get("/")
 @app.get("/health")
 async def health_check():
     """Health check endpoint - validates backend readiness"""
     if not supabase:
-        logger.error("Health check: Supabase not initialized")
-        raise HTTPException(status_code=503, detail="Backend starting up - Supabase not ready")
+        logger.warning("Health check called but Supabase not initialized yet")
+        raise HTTPException(status_code=503, detail="Backend initializing...")
+
+    try:
+        # Try a simple query to verify Supabase is actually responsive
+        supabase.table("audit_sessions").select("id").limit(1).execute()
+    except Exception as e:
+        logger.error(f"Health check: Supabase query failed: {e}")
+        raise HTTPException(status_code=503, detail=f"Database error: {str(e)}")
 
     return {
         "status": "ok",
