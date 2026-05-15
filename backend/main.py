@@ -180,6 +180,7 @@ async def start_audit(body: StartAuditRequest):
             "pdf_file_ids": pdf_file_ids or [],
             "navigator": None,
             "status": "initializing",
+            "stop_requested": False,
         }
 
         # Start audit in background
@@ -254,6 +255,27 @@ async def get_audit_pages(audit_session_id: str):
     except Exception as e:
         logger.error(f"Error getting audit pages: {e}")
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/audit/{audit_session_id}/stop")
+async def stop_audit(audit_session_id: str):
+    """Request a running audit to stop gracefully"""
+    session_data = active_sessions.get(audit_session_id)
+    if session_data:
+        session_data["stop_requested"] = True
+        logger.info(f"Stop requested for audit {audit_session_id}")
+
+    # Mark as stopped in Supabase regardless of whether session is in memory
+    # (covers the case where the request hits a fresh worker process)
+    if supabase:
+        try:
+            supabase.table("audit_sessions").update({
+                "status": "stopped",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
+            }).eq("id", audit_session_id).in_("status", ["running", "initializing"]).execute()
+        except Exception as e:
+            logger.error(f"Error marking audit as stopped: {e}")
+
+    return {"status": "stop_requested", "audit_session_id": audit_session_id}
 
 @app.get("/api/audit/{audit_session_id}/report")
 async def get_audit_report(audit_session_id: str):
@@ -383,6 +405,7 @@ async def run_audit(audit_session_id: str):
             audit_session_id=audit_session_id,
             supabase_client=supabase,
             broadcast_fn=lambda msg: asyncio.create_task(broadcast_audit_update(audit_session_id, msg)),
+            stop_flag_fn=lambda: active_sessions.get(audit_session_id, {}).get("stop_requested", False),
         )
 
         orchestrator = CrewOrchestrator(
@@ -397,20 +420,26 @@ async def run_audit(audit_session_id: str):
         # Start BFS traversal
         pages = await navigator.start_traversal()
 
-        # Run crew analysis on each page
+        # Run crew analysis on each page — check stop flag before each page
         for page in pages:
+            if session_data.get("stop_requested"):
+                logger.info(f"Audit {audit_session_id} stopped by user after navigator phase")
+                break
             await orchestrator.analyze_page(page)
 
-        # Update session as completed
+        stopped = session_data.get("stop_requested", False)
+        final_status = "stopped" if stopped else "completed"
+
+        # Update session as completed/stopped
         if supabase:
             supabase.table("audit_sessions").update({
-                "status": "completed",
+                "status": final_status,
                 "total_pages_discovered": len(pages),
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", audit_session_id).execute()
 
-        session_data["status"] = "completed"
-        logger.info(f"Audit {audit_session_id} completed successfully")
+        session_data["status"] = final_status
+        logger.info(f"Audit {audit_session_id} {final_status}")
 
         await broadcast_audit_update(audit_session_id, {
             "type": "audit_complete",

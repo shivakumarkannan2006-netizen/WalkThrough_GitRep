@@ -30,12 +30,15 @@ class ShieldNavigator:
         supabase_client,
         credentials: Optional[Tuple[str, str]] = None,
         broadcast_fn: Optional[Callable] = None,
+        stop_flag_fn: Optional[Callable[[], bool]] = None,
     ):
         self.target_url = target_url
         self.audit_session_id = audit_session_id
         self.supabase = supabase_client
         self.credentials = credentials
         self.broadcast = broadcast_fn or (lambda x: None)
+        # Callable that returns True when the user has requested a stop
+        self._stop_flag = stop_flag_fn or (lambda: False)
 
         self.settings = get_settings()
         self.playwright = None
@@ -111,6 +114,10 @@ class ShieldNavigator:
         visited_in_context = set()
 
         while queue and len(visited_in_context) < self.settings.MAX_PAGES_PER_AUDIT:
+            if self._stop_flag():
+                logger.info(f"BFS stopped by user flag at {len(visited_in_context)} pages")
+                break
+
             current_url = queue.popleft()
 
             if current_url in visited_in_context:

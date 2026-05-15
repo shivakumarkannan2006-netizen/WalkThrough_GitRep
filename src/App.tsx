@@ -957,6 +957,7 @@ function AuditResultsPage({
   const [activities, setActivities] = useState<AuditUpdate[]>([]);
   const [activeTab, setActiveTab] = useState<'activity' | 'issues' | 'pages'>('activity');
   const [backendUnavailable, setBackendUnavailable] = useState(false);
+  const [stopping, setStopping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
@@ -1061,7 +1062,7 @@ function AuditResultsPage({
           setPages(pgR.pages ?? []);
           setStatus(stR);
           console.log('[SHIELD] Poll update - Issues:', (issR.issues ?? []).length, 'Pages:', (pgR.pages ?? []).length);
-          if (stR.status === 'completed' || stR.status === 'failed') {
+          if (stR.status === 'completed' || stR.status === 'failed' || stR.status === 'stopped') {
             console.log('[SHIELD] Audit status:', stR.status);
             setRunning(false);
             clearInterval(poll);
@@ -1087,6 +1088,22 @@ function AuditResultsPage({
     };
   }, [startAudit]);
 
+  const stopAudit = useCallback(async () => {
+    if (!sessionId || !AUDIT_API) return;
+    setStopping(true);
+    try {
+      await fetch(`${AUDIT_API}/api/audit/${sessionId}/stop`, { method: 'POST' });
+      // Stop the local poll + websocket immediately
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+      wsRef.current?.close();
+      setRunning(false);
+    } catch (err) {
+      console.error('[SHIELD] stop error:', err);
+    } finally {
+      setStopping(false);
+    }
+  }, [sessionId]);
+
   const criticalCount = issues.filter(i => i.severity === 'critical').length;
   const highCount = issues.filter(i => i.severity === 'high').length;
   const issuesByAgent = issues.reduce<Record<string, Issue[]>>((acc, iss) => {
@@ -1108,12 +1125,34 @@ function AuditResultsPage({
             <p className="text-gray-400 text-xs">{sessionId ? `Session ${sessionId.slice(0, 8)}…` : 'Starting…'}</p>
           </div>
           {running && (
-            <div className="flex items-center gap-2 text-green-500 text-sm font-medium" aria-live="polite">
-              <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-              Crew active
+            <div className="flex items-center gap-2">
+              <div className="flex items-center gap-1.5 text-green-500 text-xs font-medium">
+                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
+                Live
+              </div>
+              <button
+                onClick={stopAudit}
+                disabled={stopping}
+                className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+              >
+                <X className="w-3.5 h-3.5" />
+                {stopping ? 'Stopping…' : 'Stop Scan'}
+              </button>
             </div>
           )}
-          {!running && sessionId && <span className="text-gray-400 text-sm">Complete</span>}
+          {!running && sessionId && (
+            <div className="flex items-center gap-2">
+              <span className={`text-xs font-medium px-2 py-1 rounded-full ${status.status === 'stopped' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
+                {status.status === 'stopped' ? 'Stopped' : 'Complete'}
+              </span>
+              <button
+                onClick={() => onNavigate('dashboard')}
+                className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-lg transition font-medium"
+              >
+                Dashboard
+              </button>
+            </div>
+          )}
         </div>
 
         {backendUnavailable && (
