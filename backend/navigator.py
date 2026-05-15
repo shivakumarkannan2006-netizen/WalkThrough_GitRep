@@ -79,11 +79,21 @@ class ShieldNavigator:
                         await self._traverse_bfs(auth_context, authenticated=True)
 
                 finally:
-                    await unauth_context.close()
+                    # Always close contexts and browser — prevents zombie processes on crash
+                    try:
+                        await unauth_context.close()
+                    except Exception:
+                        pass
                     if auth_context:
-                        await auth_context.close()
-
-                await self.browser.close()
+                        try:
+                            await auth_context.close()
+                        except Exception:
+                            pass
+                    try:
+                        await self.browser.close()
+                        self.browser = None
+                    except Exception as e:
+                        logger.error(f"Error closing browser: {e}")
 
             logger.info(f"Traversal completed. Discovered {len(self.pages_data)} pages")
             await self.broadcast({"type": "traversal_completed", "total_pages": len(self.pages_data)})

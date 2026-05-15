@@ -7,6 +7,7 @@ import asyncio
 import logging
 import json
 import re
+from datetime import datetime, timezone
 from fastapi import FastAPI, WebSocket, UploadFile, File, HTTPException, Depends, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -55,8 +56,9 @@ async def lifespan(app: FastAPI):
     logger.info("="*60)
     logger.info("Shield Agent starting up...")
     logger.info(f"Server: {settings.SERVER_HOST}:{settings.SERVER_PORT}")
-    logger.info(f"SUPABASE_URL: {settings.SUPABASE_URL[:50]}..." if settings.SUPABASE_URL else "MISSING")
-    logger.info(f"SUPABASE_KEY: {'*' * 10}..." if settings.SUPABASE_KEY else "MISSING")
+    logger.info(f"SUPABASE_URL: {settings.SUPABASE_URL[:50]}..." if settings.SUPABASE_URL else "SUPABASE_URL: MISSING")
+    logger.info(f"SUPABASE_KEY: {'*' * 10}" if settings.SUPABASE_KEY else "SUPABASE_KEY: MISSING")
+    logger.info(f"SUPABASE_SERVICE_ROLE_KEY: {'set (will be used)' if settings.SUPABASE_SERVICE_ROLE_KEY else 'NOT SET — falling back to SUPABASE_KEY'}")
     logger.info("="*60)
 
     # Initialize Supabase during startup (not at import time).
@@ -152,6 +154,8 @@ async def start_audit(body: StartAuditRequest):
     try:
         audit_session_id = str(uuid.uuid4())
 
+        now_iso = datetime.now(timezone.utc).isoformat()
+
         # Create audit session in Supabase
         audit_session = {
             "id": audit_session_id,
@@ -160,7 +164,7 @@ async def start_audit(body: StartAuditRequest):
             "status": "running",
             "credentials_used": bool(username and password),
             "username": username,
-            "created_at": "now()",
+            "created_at": now_iso,
         }
 
         response = supabase.table("audit_sessions").insert(audit_session).execute()
@@ -402,7 +406,7 @@ async def run_audit(audit_session_id: str):
             supabase.table("audit_sessions").update({
                 "status": "completed",
                 "total_pages_discovered": len(pages),
-                "completed_at": "now()",
+                "completed_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", audit_session_id).execute()
 
         session_data["status"] = "completed"
@@ -457,10 +461,17 @@ async def health_check():
     }
 
 if __name__ == "__main__":
+    import os
     import uvicorn
+    # Railway injects PORT at runtime; config.py already reads it but we re-read
+    # here so the __main__ guard always uses the live env value even if the cached
+    # Settings object was created before Railway set the variable.
+    port = int(os.environ.get("PORT", settings.SERVER_PORT))
     uvicorn.run(
         app,
         host=settings.SERVER_HOST,
-        port=settings.SERVER_PORT,
+        port=port,
         log_level=settings.LOG_LEVEL.lower(),
+        proxy_headers=True,
+        forwarded_allow_ips="*",
     )

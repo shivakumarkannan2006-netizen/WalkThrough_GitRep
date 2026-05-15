@@ -15,7 +15,7 @@ let AUDIT_API = '';
 // otherwise fetched at runtime from the get-config edge function.
 const _buildTimeUrl = import.meta.env.VITE_AUDIT_API_URL as string | undefined;
 if (_buildTimeUrl) {
-  AUDIT_API = _buildTimeUrl;
+  AUDIT_API = _buildTimeUrl.replace(/\/+$/, '');
   console.log('[SHIELD] AUDIT_API from build-time env:', AUDIT_API);
 }
 
@@ -30,7 +30,7 @@ async function loadAuditApiUrl(): Promise<void> {
     if (res.ok) {
       const data = await res.json();
       if (data.audit_api_url) {
-        AUDIT_API = data.audit_api_url;
+        AUDIT_API = (data.audit_api_url as string).replace(/\/+$/, '');
         console.log('[SHIELD] AUDIT_API loaded from edge function:', AUDIT_API);
       } else {
         console.warn('[SHIELD] get-config returned empty audit_api_url');
