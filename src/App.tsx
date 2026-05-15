@@ -588,6 +588,15 @@ function SignupPage({
 
 // ─── User Dashboard ───────────────────────────────────────────────────────────
 
+interface AuditSession {
+  id: string;
+  target_url: string;
+  status: string;
+  created_at: string;
+  total_pages_discovered?: number;
+  total_issues_found?: number;
+}
+
 function DashboardPage({
   profile,
   onNavigate,
@@ -595,11 +604,12 @@ function DashboardPage({
 }: {
   profile: UserProfile;
   onNavigate: (p: Page) => void;
-  onStartAudit: (url: string, name: string, siteId: string) => void;
+  onStartAudit: (url: string, name: string, siteId: string, existingSessionId?: string) => void;
 }) {
   console.log('[DashboardPage] render — user:', profile.email);
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
+  const [auditSessions, setAuditSessions] = useState<Record<string, AuditSession[]>>({});
   // activeSiteId: which site row is expanded with audit tabs
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
 
@@ -612,8 +622,27 @@ function DashboardPage({
       .order('created_at', { ascending: false })
       .then(({ data, error }) => {
         if (error) console.error('[DashboardPage] sites fetch error:', error);
-        setSites((data as Site[]) ?? []);
+        const fetchedSites = (data as Site[]) ?? [];
+        setSites(fetchedSites);
         setLoading(false);
+        // Fetch audit sessions for all sites in one query
+        if (fetchedSites.length > 0) {
+          const siteUrls = fetchedSites.map(s => s.site_url);
+          supabase
+            .from('audit_sessions')
+            .select('id, target_url, status, created_at, total_pages_discovered, total_issues_found')
+            .in('target_url', siteUrls)
+            .order('created_at', { ascending: false })
+            .then(({ data: sessions, error: sessErr }) => {
+              if (sessErr) console.error('[DashboardPage] audit_sessions fetch error:', sessErr);
+              const grouped: Record<string, AuditSession[]> = {};
+              for (const sess of (sessions ?? []) as AuditSession[]) {
+                // key by target_url so we can look up by site_url
+                (grouped[sess.target_url] = grouped[sess.target_url] ?? []).push(sess);
+              }
+              setAuditSessions(grouped);
+            });
+        }
       });
   }, [profile.id]);
 
@@ -701,21 +730,54 @@ function DashboardPage({
                       </div>
                     </button>
 
-                    {/* Expanded: tabs for each audit run */}
+                    {/* Expanded: past audit sessions for this site group */}
                     {isExpanded && (
                       <div className="border-t border-gray-100 px-5 pb-4">
-                        <div className="flex gap-2 pt-3 overflow-x-auto pb-1">
-                          {groupSites.map((s, idx) => (
-                            <button
-                              key={s.id}
-                              onClick={() => onStartAudit(s.site_url, s.site_name || 'Unnamed', s.id)}
-                              className="flex-shrink-0 flex items-center gap-2 bg-gray-50 hover:bg-teal-50 border border-gray-200 hover:border-teal-300 text-gray-600 hover:text-teal-700 px-4 py-2 rounded-lg text-sm transition"
-                            >
-                              <Clock className="w-3.5 h-3.5" />
-                              Audit {groupSites.length - idx} — {new Date(s.created_at).toLocaleDateString()}
-                              <ExternalLink className="w-3.5 h-3.5 opacity-60" />
-                            </button>
-                          ))}
+                        <div className="pt-3 space-y-2">
+                          {groupSites.flatMap(s => {
+                            const sessions = auditSessions[s.site_url] ?? [];
+                            return sessions.length > 0 ? sessions.map(sess => {
+                              const statusColor =
+                                sess.status === 'completed' ? 'bg-green-100 text-green-700' :
+                                sess.status === 'stopped'   ? 'bg-amber-100 text-amber-700' :
+                                sess.status === 'failed'    ? 'bg-red-100 text-red-700' :
+                                                              'bg-blue-100 text-blue-700';
+                              return (
+                                <button
+                                  key={sess.id}
+                                  onClick={() => onStartAudit(s.site_url, s.site_name || 'Unnamed', s.id, sess.id)}
+                                  className="w-full flex items-center justify-between bg-gray-50 hover:bg-teal-50 border border-gray-200 hover:border-teal-300 px-4 py-3 rounded-lg transition text-left group"
+                                >
+                                  <div className="flex items-center gap-3 min-w-0">
+                                    <Clock className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                                    <div className="min-w-0">
+                                      <p className="text-sm text-gray-700 font-medium group-hover:text-teal-700 truncate">
+                                        {new Date(sess.created_at).toLocaleString()}
+                                      </p>
+                                      <p className="text-xs text-gray-400">
+                                        {sess.total_pages_discovered ?? 0} pages · {sess.total_issues_found ?? 0} issues
+                                      </p>
+                                    </div>
+                                  </div>
+                                  <div className="flex items-center gap-2 flex-shrink-0 ml-3">
+                                    <span className={`text-xs font-medium px-2 py-0.5 rounded-full ${statusColor}`}>{sess.status}</span>
+                                    <ExternalLink className="w-3.5 h-3.5 text-gray-300 group-hover:text-teal-500 transition" />
+                                  </div>
+                                </button>
+                              );
+                            }) : [
+                              <div key={s.id} className="text-gray-400 text-sm py-2 px-1">
+                                No audit sessions recorded yet for this site.
+                              </div>
+                            ];
+                          })}
+                          <button
+                            onClick={() => onStartAudit(groupSites[0].site_url, groupSites[0].site_name || 'Unnamed', groupSites[0].id)}
+                            className="w-full flex items-center justify-center gap-2 border border-dashed border-teal-300 text-teal-600 hover:bg-teal-50 px-4 py-2.5 rounded-lg text-sm transition font-medium mt-1"
+                          >
+                            <Plus className="w-4 h-4" />
+                            Run New Audit
+                          </button>
                         </div>
                       </div>
                     )}
@@ -782,7 +844,7 @@ function EvaluationPage({
 }: {
   profile: UserProfile;
   onNavigate: (p: Page) => void;
-  onStartAudit: (url: string, siteName: string, siteId: string) => void;
+  onStartAudit: (url: string, siteName: string, siteId: string, existingSessionId?: string) => void;
 }) {
   console.log('[EvaluationPage] render — user:', profile.email);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -943,38 +1005,49 @@ function EvaluationPage({
 
 function AuditResultsPage({
   auditUrl,
+  existingSessionId,
   onNavigate,
 }: {
   auditUrl: string;
+  existingSessionId: string | null;
   onNavigate: (p: Page) => void;
 }) {
-  console.log('[AuditResultsPage] render — auditUrl:', auditUrl);
-  const [sessionId, setSessionId] = useState<string | null>(null);
+  const isPastAudit = !!existingSessionId;
+  const [sessionId, setSessionId] = useState<string | null>(existingSessionId);
   const [running, setRunning] = useState(false);
+  const [loadingPast, setLoadingPast] = useState(isPastAudit);
   const [status, setStatus] = useState<{ status?: string; total_pages_discovered?: number }>({});
   const [issues, setIssues] = useState<Issue[]>([]);
   const [pages, setPages] = useState<{ url: string }[]>([]);
   const [activities, setActivities] = useState<AuditUpdate[]>([]);
-  const [activeTab, setActiveTab] = useState<'activity' | 'issues' | 'pages'>('activity');
+  const [activeTab, setActiveTab] = useState<'activity' | 'issues' | 'pages'>('issues');
   const [backendUnavailable, setBackendUnavailable] = useState(false);
   const [stopping, setStopping] = useState(false);
   const wsRef = useRef<WebSocket | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Load past audit results directly from Supabase — no new scan ──────────
+  useEffect(() => {
+    if (!isPastAudit || !existingSessionId) return;
+    setLoadingPast(true);
+    Promise.all([
+      supabase.from('audit_sessions').select('status, total_pages_discovered, total_issues_found').eq('id', existingSessionId).maybeSingle(),
+      supabase.from('audit_issues').select('*').eq('audit_session_id', existingSessionId),
+      supabase.from('audit_pages').select('url').eq('audit_session_id', existingSessionId),
+    ]).then(([sessRes, issRes, pagesRes]) => {
+      if (sessRes.data) setStatus(sessRes.data as { status?: string; total_pages_discovered?: number });
+      setIssues((issRes.data ?? []) as Issue[]);
+      setPages((pagesRes.data ?? []) as { url: string }[]);
+    }).catch(err => {
+      console.error('[SHIELD] past audit load error:', err);
+    }).finally(() => setLoadingPast(false));
+  }, [isPastAudit, existingSessionId]);
+
+  // ── Start a brand-new audit (only when NOT viewing a past audit) ──────────
   const startAudit = useCallback(async () => {
-    // Ensure the edge-function config fetch has completed before we check AUDIT_API
     await _auditApiReady;
 
-    console.log('[SHIELD] startAudit called with auditUrl:', auditUrl, 'AUDIT_API:', AUDIT_API);
-
-    if (!auditUrl) {
-      console.warn('[SHIELD] No audit URL provided');
-      setBackendUnavailable(true);
-      return;
-    }
-
-    if (!AUDIT_API) {
-      console.error('[SHIELD] AUDIT_API not configured. Set VITE_AUDIT_API_URL in Bolt secrets and redeploy.');
+    if (!auditUrl || !AUDIT_API) {
       setBackendUnavailable(true);
       return;
     }
@@ -985,85 +1058,47 @@ function AuditResultsPage({
     setActivities([]);
 
     try {
-      console.log('[SHIELD] Initiating audit with backend URL:', AUDIT_API);
-      const startUrl = `${AUDIT_API}/api/start-audit`;
-      console.log('[SHIELD] POST to:', startUrl);
-
-      const res = await fetch(startUrl, {
+      const res = await fetch(`${AUDIT_API}/api/start-audit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ target_url: auditUrl, company_id: '6f7e7833-7eb5-4b5a-b026-3e0b06f9646b' }),
       });
 
-      console.log('[SHIELD] Backend response status:', res.status);
-
       if (!res.ok) {
         const errText = await res.text();
-        console.error('[SHIELD] Backend error response:', errText);
         throw new Error(`Backend error: ${res.status} ${errText}`);
       }
 
       const data = await res.json();
-      console.log('[SHIELD] Audit session created:', data);
-
-      if (!data.audit_session_id) {
-        console.error('[SHIELD] No audit_session_id in response:', data);
-        setRunning(false);
-        setBackendUnavailable(true);
-        return;
-      }
+      if (!data.audit_session_id) { setRunning(false); setBackendUnavailable(true); return; }
 
       setSessionId(data.audit_session_id);
-      console.log('[SHIELD] Session ID set:', data.audit_session_id);
 
       const wsUrl = AUDIT_API.replace('https://', 'wss://').replace('http://', 'ws://');
-      const wsPath = `${wsUrl}/ws/audit/${data.audit_session_id}`;
-      console.log('[SHIELD] Attempting WebSocket connection to:', wsPath);
-
-      const ws = new WebSocket(wsPath);
-
+      const ws = new WebSocket(`${wsUrl}/ws/audit/${data.audit_session_id}`);
       ws.onopen = () => console.log('[SHIELD] WebSocket connected');
       ws.onerror = (e) => console.error('[SHIELD] WebSocket error:', e);
       ws.onclose = () => console.log('[SHIELD] WebSocket closed');
-
       ws.onmessage = e => {
         try {
           const msg: AuditUpdate = JSON.parse(e.data);
-          console.log('[SHIELD] WebSocket message:', msg.type);
           setActivities(prev => [msg, ...prev.slice(0, 149)]);
-          if (msg.type === 'audit_complete') {
-            console.log('[SHIELD] Audit complete');
-            setRunning(false);
-          }
-        } catch (err) {
-          console.error('[SHIELD] Failed to parse WebSocket message:', err);
-        }
+          if (msg.type === 'audit_complete') setRunning(false);
+        } catch { /* ignore parse errors */ }
       };
-
       wsRef.current = ws;
 
       const poll = setInterval(async () => {
         try {
           const [issR, pgR, stR] = await Promise.all([
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/issues`).then(async r => {
-              if (!r.ok) throw new Error(`Issues API: ${r.status}`);
-              return r.json();
-            }),
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/pages`).then(async r => {
-              if (!r.ok) throw new Error(`Pages API: ${r.status}`);
-              return r.json();
-            }),
-            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/status`).then(async r => {
-              if (!r.ok) throw new Error(`Status API: ${r.status}`);
-              return r.json();
-            }),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/issues`).then(r => r.json()),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/pages`).then(r => r.json()),
+            fetch(`${AUDIT_API}/api/audit/${data.audit_session_id}/status`).then(r => r.json()),
           ]);
           setIssues(issR.issues ?? []);
           setPages(pgR.pages ?? []);
           setStatus(stR);
-          console.log('[SHIELD] Poll update - Issues:', (issR.issues ?? []).length, 'Pages:', (pgR.pages ?? []).length);
-          if (stR.status === 'completed' || stR.status === 'failed' || stR.status === 'stopped') {
-            console.log('[SHIELD] Audit status:', stR.status);
+          if (['completed', 'failed', 'stopped'].includes(stR.status)) {
             setRunning(false);
             clearInterval(poll);
           }
@@ -1074,29 +1109,30 @@ function AuditResultsPage({
       pollRef.current = poll;
     } catch (err) {
       console.error('[SHIELD] startAudit error:', err);
-      console.error('[SHIELD] Stack:', err instanceof Error ? err.stack : 'N/A');
       setBackendUnavailable(true);
       setRunning(false);
     }
   }, [auditUrl]);
 
   useEffect(() => {
+    if (isPastAudit) return; // never start a new scan for past audits
     startAudit();
     return () => {
       wsRef.current?.close();
       if (pollRef.current) clearInterval(pollRef.current);
     };
-  }, [startAudit]);
+  }, [startAudit, isPastAudit]);
 
+  // ── Stop handler ──────────────────────────────────────────────────────────
   const stopAudit = useCallback(async () => {
     if (!sessionId || !AUDIT_API) return;
     setStopping(true);
     try {
       await fetch(`${AUDIT_API}/api/audit/${sessionId}/stop`, { method: 'POST' });
-      // Stop the local poll + websocket immediately
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
       wsRef.current?.close();
       setRunning(false);
+      setStatus(prev => ({ ...prev, status: 'stopped' }));
     } catch (err) {
       console.error('[SHIELD] stop error:', err);
     } finally {
@@ -1111,71 +1147,95 @@ function AuditResultsPage({
     return acc;
   }, {});
 
-  console.log('[SHIELD_RENDER] AuditResultsPage - auditUrl:', auditUrl, 'AUDIT_API:', AUDIT_API, 'sessionId:', sessionId, 'running:', running, 'backendUnavailable:', backendUnavailable);
+  const statusLabel = status.status ?? (running ? 'running' : '');
+  const statusColor =
+    statusLabel === 'completed' ? 'bg-green-100 text-green-700' :
+    statusLabel === 'stopped'   ? 'bg-amber-100 text-amber-700' :
+    statusLabel === 'failed'    ? 'bg-red-100 text-red-700' :
+    statusLabel === 'running'   ? 'bg-blue-100 text-blue-700' : 'bg-gray-100 text-gray-500';
+
+  if (loadingPast) {
+    return (
+      <div className="min-h-screen bg-gray-50 flex items-center justify-center">
+        <div className="flex flex-col items-center gap-3">
+          <RefreshCw className="w-8 h-8 text-teal-500 animate-spin" />
+          <p className="text-gray-500 text-sm">Loading audit results…</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="min-h-screen bg-gray-50 px-4 py-8">
       <div className="max-w-6xl mx-auto">
-        <div className="flex items-center gap-3 mb-6">
-          <button onClick={() => onNavigate('dashboard')} className="text-gray-400 hover:text-gray-900 transition">
+
+        {/* ── Page header ── */}
+        <div className="flex items-start gap-3 mb-6">
+          <button onClick={() => onNavigate('dashboard')} className="text-gray-400 hover:text-gray-900 transition mt-1">
             <ArrowLeft className="w-5 h-5" />
           </button>
           <div className="flex-1 min-w-0">
-            <h1 className="text-xl font-bold text-gray-900 truncate">Audit: {auditUrl}</h1>
-            <p className="text-gray-400 text-xs">{sessionId ? `Session ${sessionId.slice(0, 8)}…` : 'Starting…'}</p>
+            <div className="flex items-center gap-2 flex-wrap">
+              <h1 className="text-xl font-bold text-gray-900 truncate">
+                {isPastAudit ? 'Audit Results' : 'Live Audit'}
+              </h1>
+              {statusLabel && (
+                <span className={`text-xs font-semibold px-2.5 py-1 rounded-full ${statusColor}`}>
+                  {statusLabel}
+                </span>
+              )}
+              {running && <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />}
+            </div>
+            <p className="text-gray-400 text-xs mt-0.5 truncate">{auditUrl}</p>
+            {sessionId && <p className="text-gray-300 text-xs font-mono">Session {sessionId.slice(0, 8)}…</p>}
           </div>
-          {running && (
-            <div className="flex items-center gap-2">
-              <div className="flex items-center gap-1.5 text-green-500 text-xs font-medium">
-                <div className="w-2 h-2 bg-green-500 rounded-full animate-pulse" />
-                Live
-              </div>
+        </div>
+
+        {/* ── Live scan controls — only shown during an active scan ── */}
+        {running && (
+          <div className="bg-white border border-gray-200 rounded-2xl p-5 mb-6 flex flex-col sm:flex-row sm:items-center gap-4">
+            <div className="flex-1">
+              <p className="text-sm font-semibold text-gray-800 mb-0.5">Scan in progress</p>
+              <p className="text-xs text-gray-400">
+                {pages.length} pages discovered · {issues.length} issues found so far
+              </p>
+            </div>
+            <div className="flex gap-3">
               <button
                 onClick={stopAudit}
                 disabled={stopping}
-                className="flex items-center gap-1.5 bg-red-50 hover:bg-red-100 border border-red-200 text-red-700 text-xs font-semibold px-3 py-1.5 rounded-lg transition disabled:opacity-50"
+                className="flex items-center gap-2 bg-red-600 hover:bg-red-700 disabled:opacity-50 text-white text-sm font-semibold px-5 py-2.5 rounded-xl transition shadow-sm"
               >
-                <X className="w-3.5 h-3.5" />
-                {stopping ? 'Stopping…' : 'Stop Scan'}
+                <X className="w-4 h-4" />
+                {stopping ? 'Stopping…' : 'Stop & View Results'}
               </button>
-            </div>
-          )}
-          {!running && sessionId && (
-            <div className="flex items-center gap-2">
-              <span className={`text-xs font-medium px-2 py-1 rounded-full ${status.status === 'stopped' ? 'bg-amber-100 text-amber-700' : 'bg-green-100 text-green-700'}`}>
-                {status.status === 'stopped' ? 'Stopped' : 'Complete'}
-              </span>
               <button
                 onClick={() => onNavigate('dashboard')}
-                className="text-xs bg-gray-100 hover:bg-gray-200 text-gray-600 px-3 py-1.5 rounded-lg transition font-medium"
+                className="flex items-center gap-2 bg-gray-100 hover:bg-gray-200 text-gray-600 text-sm font-medium px-5 py-2.5 rounded-xl transition"
               >
-                Dashboard
+                Quit to Dashboard
               </button>
-            </div>
-          )}
-        </div>
-
-        {backendUnavailable && (
-          <div role="alert" className="bg-red-50 border border-red-300 text-red-800 rounded-xl p-5 mb-6 space-y-3">
-            <div>
-              <p className="font-semibold mb-1">Backend not connected</p>
-              <p className="text-sm mb-2">
-                The audit engine requires a deployed backend. Follow these steps:
-              </p>
-              <ol className="text-sm list-decimal list-inside space-y-1 ml-1">
-                <li><strong>Deploy backend on Railway:</strong> Push code and configure secrets (GEMINI_API_KEY, SUPABASE_*)</li>
-                <li><strong>Copy Railway URL:</strong> Get your deployed backend URL (e.g., https://your-service.up.railway.app)</li>
-                <li><strong>Set environment variable:</strong> In Bolt, add <code className="bg-red-100 px-1 rounded text-xs font-mono">VITE_AUDIT_API_URL</code> = your Railway URL</li>
-                <li><strong>Rebuild:</strong> Redeploy this frontend on Bolt</li>
-                <li><strong>Check console:</strong> Open DevTools (F12) → Console tab, look for [SHIELD] logs to verify connection</li>
-              </ol>
-            </div>
-            <div className="text-xs bg-red-100 p-2 rounded font-mono break-all">
-              Current VITE_AUDIT_API_URL: {AUDIT_API || '(not set)'}
             </div>
           </div>
         )}
 
+        {/* ── Backend unavailable banner ── */}
+        {backendUnavailable && (
+          <div role="alert" className="bg-red-50 border border-red-300 text-red-800 rounded-xl p-5 mb-6">
+            <p className="font-semibold mb-1">Backend not connected</p>
+            <p className="text-sm mb-2">The audit engine requires a deployed backend.</p>
+            <ol className="text-sm list-decimal list-inside space-y-1 ml-1">
+              <li>Deploy backend on Railway with GEMINI_API_KEY + SUPABASE_* secrets</li>
+              <li>Copy your Railway URL (e.g. https://your-service.up.railway.app)</li>
+              <li>Add <code className="bg-red-100 px-1 rounded text-xs font-mono">VITE_AUDIT_API_URL</code> in Bolt and redeploy</li>
+            </ol>
+            <p className="text-xs font-mono mt-3 bg-red-100 px-2 py-1 rounded break-all">
+              Current VITE_AUDIT_API_URL: {AUDIT_API || '(not set)'}
+            </p>
+          </div>
+        )}
+
+        {/* ── Stats row ── */}
         <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mb-6">
           {[
             { label: 'Pages', value: status.total_pages_discovered ?? pages.length, color: 'text-teal-600' },
@@ -1190,13 +1250,17 @@ function AuditResultsPage({
           ))}
         </div>
 
+        {/* ── Main content grid ── */}
         <div className="grid lg:grid-cols-3 gap-6">
           <div className="lg:col-span-2">
             <div className="flex border-b border-gray-200">
-              {(['activity', 'issues', 'pages'] as const).map(tab => (
+              {(isPastAudit
+                ? ['issues', 'pages'] as const
+                : ['activity', 'issues', 'pages'] as const
+              ).map(tab => (
                 <button
                   key={tab}
-                  onClick={() => setActiveTab(tab)}
+                  onClick={() => setActiveTab(tab as typeof activeTab)}
                   className={`px-5 py-3 text-sm font-medium transition capitalize ${activeTab === tab ? 'border-b-2 border-teal-500 text-teal-600' : 'text-gray-400 hover:text-gray-700'}`}
                 >
                   {tab === 'activity' ? 'Crew Activity' : tab === 'issues' ? `Issues (${issues.length})` : `Pages (${pages.length})`}
@@ -1209,86 +1273,77 @@ function AuditResultsPage({
                 <div className="space-y-2 max-h-96 overflow-y-auto" aria-live="polite">
                   {activities.length === 0 ? (
                     <div className="text-center py-12">
-                      {running ? (
-                        <div className="flex flex-col items-center gap-3">
-                          <RefreshCw className="w-7 h-7 text-teal-500 animate-spin" />
-                          <p className="text-gray-400 text-sm">Waiting for crew activity…</p>
-                        </div>
-                      ) : (
-                        <p className="text-gray-400 text-sm">No activity recorded.</p>
-                      )}
+                      {running
+                        ? <div className="flex flex-col items-center gap-3"><RefreshCw className="w-7 h-7 text-teal-500 animate-spin" /><p className="text-gray-400 text-sm">Waiting for crew activity…</p></div>
+                        : <p className="text-gray-400 text-sm">No live activity — view Issues or Pages tabs for results.</p>
+                      }
                     </div>
-                  ) : (
-                    activities.map((a, i) => {
-                      const agent = a.agent ? (typeof a.agent === 'string' ? a.agent : JSON.stringify(a.agent)) : null;
-                      const url = a.url ? (typeof a.url === 'string' ? a.url : JSON.stringify(a.url)) : null;
-                      const message = a.message ? (typeof a.message === 'string' ? a.message : JSON.stringify(a.message)) : null;
-                      return (
-                        <div key={i} className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-xs font-mono">
-                          <span className="text-teal-600 font-semibold">{a.type}</span>
-                          {agent && <span className="text-gray-400 ml-2">({agent})</span>}
-                          {url && <div className="text-gray-500 truncate mt-0.5">{url}</div>}
-                          {message && <div className="text-gray-600 mt-0.5">{message}</div>}
-                        </div>
-                      );
-                    })
-                  )}
+                  ) : activities.map((a, i) => {
+                    const agent = a.agent ? (typeof a.agent === 'string' ? a.agent : JSON.stringify(a.agent)) : null;
+                    const url = a.url ? (typeof a.url === 'string' ? a.url : JSON.stringify(a.url)) : null;
+                    const message = a.message ? (typeof a.message === 'string' ? a.message : JSON.stringify(a.message)) : null;
+                    return (
+                      <div key={i} className="bg-gray-50 border border-gray-100 rounded-lg p-3 text-xs font-mono">
+                        <span className="text-teal-600 font-semibold">{a.type}</span>
+                        {agent && <span className="text-gray-400 ml-2">({agent})</span>}
+                        {url && <div className="text-gray-500 truncate mt-0.5">{url}</div>}
+                        {message && <div className="text-gray-600 mt-0.5">{message}</div>}
+                      </div>
+                    );
+                  })}
                 </div>
               )}
 
               {activeTab === 'issues' && (
-                <div className="space-y-3 max-h-96 overflow-y-auto">
+                <div className="space-y-3 max-h-[36rem] overflow-y-auto">
                   {issues.length === 0 ? (
                     <p className="text-gray-400 text-sm text-center py-12" aria-live="polite">
                       {running ? 'Scanning for issues…' : 'No issues found.'}
                     </p>
-                  ) : (
-                    issues.map((iss, i) => (
-                      <div key={iss.id ?? i} className={`border-l-4 rounded-lg p-4 ${severityBorder(iss.severity)}`}>
-                        <div className="flex items-start justify-between gap-2">
-                          <div className="flex-1 min-w-0">
-                            <div className="flex items-center gap-2 mb-1">
-                              <span className="font-mono text-sm opacity-50">{agentGlyph(iss.agent_name)}</span>
-                              <span className="text-xs font-semibold opacity-70">{agentLabel(iss.agent_name)}</span>
-                              <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ml-auto ${severityBadge(iss.severity)}`}>{iss.severity}</span>
-                            </div>
-                            <p className="text-sm">{iss.specific_issue_detail}</p>
-                            {iss.affected_url && <p className="text-xs opacity-50 truncate mt-1">{iss.affected_url}</p>}
-                            {iss.remediation_suggestion && (
-                              <p className="text-xs opacity-60 mt-2 border-t border-current/20 pt-2">Fix: {iss.remediation_suggestion}</p>
-                            )}
+                  ) : issues.map((iss, i) => (
+                    <div key={iss.id ?? i} className={`border-l-4 rounded-lg p-4 ${severityBorder(iss.severity)}`}>
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <div className="flex items-center gap-2 mb-1 flex-wrap">
+                            <span className="font-mono text-sm opacity-50">{agentGlyph(iss.agent_name)}</span>
+                            <span className="text-xs font-semibold opacity-70">{agentLabel(iss.agent_name)}</span>
+                            <span className={`text-xs px-2 py-0.5 rounded-full font-semibold ml-auto ${severityBadge(iss.severity)}`}>{iss.severity}</span>
                           </div>
+                          <p className="text-sm">{iss.specific_issue_detail}</p>
+                          {iss.affected_url && <p className="text-xs opacity-50 truncate mt-1">{iss.affected_url}</p>}
+                          {iss.remediation_suggestion && (
+                            <p className="text-xs opacity-60 mt-2 border-t border-current/20 pt-2">Fix: {iss.remediation_suggestion}</p>
+                          )}
                         </div>
                       </div>
-                    ))
-                  )}
+                    </div>
+                  ))}
                 </div>
               )}
 
               {activeTab === 'pages' && (
-                <div className="space-y-1.5 max-h-96 overflow-y-auto">
+                <div className="space-y-1.5 max-h-[36rem] overflow-y-auto">
                   {pages.length === 0 ? (
                     <p className="text-gray-400 text-sm text-center py-12" aria-live="polite">
                       {running ? 'Discovering pages…' : 'No pages discovered.'}
                     </p>
-                  ) : (
-                    pages.map((p, i) => (
-                      <div key={i} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 text-xs">
-                        <Globe className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
-                        <span className="text-gray-600 truncate">{p.url}</span>
-                      </div>
-                    ))
-                  )}
+                  ) : pages.map((p, i) => (
+                    <div key={i} className="flex items-center gap-2 bg-gray-50 rounded-lg px-3 py-2 text-xs">
+                      <Globe className="w-3.5 h-3.5 text-gray-400 flex-shrink-0" />
+                      <span className="text-gray-600 truncate">{p.url}</span>
+                    </div>
+                  ))}
                 </div>
               )}
             </div>
           </div>
 
+          {/* ── Sidebar ── */}
           <div className="space-y-4">
             <div className="bg-white border border-gray-200 rounded-xl p-5">
-              <h3 className="font-semibold text-gray-900 text-sm mb-4">Crew Summary</h3>
+              <h3 className="font-semibold text-gray-900 text-sm mb-4">Issues by Agent</h3>
               {Object.entries(issuesByAgent).length === 0 ? (
-                <p className="text-gray-400 text-xs">Waiting for agent reports…</p>
+                <p className="text-gray-400 text-xs">{running ? 'Waiting for agent reports…' : 'No issues recorded.'}</p>
               ) : (
                 <div className="space-y-3">
                   {Object.entries(issuesByAgent).map(([agent, agentIssues]) => (
@@ -1335,7 +1390,10 @@ function AuditResultsPage({
               </div>
             )}
 
-            <button onClick={() => onNavigate('dashboard')} className="w-full border border-gray-200 hover:border-gray-400 text-gray-500 hover:text-gray-900 py-2.5 rounded-lg text-sm transition">
+            <button
+              onClick={() => onNavigate('dashboard')}
+              className="w-full border border-gray-200 hover:border-gray-400 text-gray-500 hover:text-gray-900 py-2.5 rounded-lg text-sm transition"
+            >
               Back to Dashboard
             </button>
           </div>
@@ -1595,6 +1653,7 @@ export default function App() {
   const [page, setPage] = useState<Page>('landing');
   const [profile, setProfile] = useState<UserProfile | null>(null);
   const [auditUrl, setAuditUrl] = useState('');
+  const [auditSessionId, setAuditSessionId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
 
   useEffect(() => {
@@ -1664,9 +1723,10 @@ export default function App() {
     setPage(p);
   };
 
-  const handleStartAudit = (_url: string, _name: string, _siteId: string) => {
-    console.log('[App] handleStartAudit — url:', _url, 'siteId:', _siteId);
+  const handleStartAudit = (_url: string, _name: string, _siteId: string, _existingSessionId?: string) => {
+    console.log('[App] handleStartAudit — url:', _url, 'siteId:', _siteId, 'existingSession:', _existingSessionId ?? 'new');
     setAuditUrl(_url);
+    setAuditSessionId(_existingSessionId ?? null);
     setPage('audit-results');
   };
 
@@ -1710,7 +1770,7 @@ export default function App() {
 
         <ErrorBoundary name="AuditResultsPage">
           {page === 'audit-results' && (
-            <AuditResultsPage auditUrl={auditUrl} onNavigate={handleNavigate} />
+            <AuditResultsPage auditUrl={auditUrl} existingSessionId={auditSessionId} onNavigate={handleNavigate} />
           )}
         </ErrorBoundary>
 
