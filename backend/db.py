@@ -19,14 +19,23 @@ def init_supabase():
 
     settings = get_settings()
 
-    if not settings.SUPABASE_URL or not settings.SUPABASE_KEY:
-        msg = "SUPABASE_URL and SUPABASE_KEY environment variables must be set"
+    if not settings.SUPABASE_URL:
+        msg = "SUPABASE_URL environment variable must be set"
+        logger.error(msg)
+        raise ValueError(msg)
+
+    # Prefer service role key so all backend writes bypass RLS.
+    # Falls back to SUPABASE_KEY if service role key is not configured.
+    key = settings.SUPABASE_SERVICE_ROLE_KEY or settings.SUPABASE_KEY
+    if not key:
+        msg = "SUPABASE_SERVICE_ROLE_KEY (or SUPABASE_KEY) environment variable must be set"
         logger.error(msg)
         raise ValueError(msg)
 
     try:
-        _supabase_client = create_client(settings.SUPABASE_URL, settings.SUPABASE_KEY)
-        logger.info("Supabase client initialized successfully")
+        _supabase_client = create_client(settings.SUPABASE_URL, key)
+        key_type = "service role" if settings.SUPABASE_SERVICE_ROLE_KEY else "anon"
+        logger.info(f"Supabase client initialized successfully using {key_type} key")
         return _supabase_client
     except Exception as e:
         logger.error(f"Failed to initialize Supabase client: {e}")
