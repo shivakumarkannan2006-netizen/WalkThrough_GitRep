@@ -11,10 +11,8 @@ Deno.serve(async (req: Request) => {
     return new Response(null, { status: 200, headers: corsHeaders });
   }
 
-  // Try both naming conventions, then fall back to the known Railway URL.
-  // This ensures the frontend always gets a valid URL even if secrets aren't configured.
+  // Read VITE_AUDIT_API_URL secret, fall back to the known Railway URL.
   const auditApiUrl =
-    Deno.env.get("AUDIT_API_URL") ||
     Deno.env.get("VITE_AUDIT_API_URL") ||
     "https://walkthroughgitrep-production.up.railway.app";
 
