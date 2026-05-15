@@ -991,7 +991,7 @@ function AuditResultsPage({
       const res = await fetch(startUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_url: auditUrl, company_id: '00000000-0000-0000-0000-000000000000' }),
+        body: JSON.stringify({ target_url: auditUrl, company_id: '6f7e7833-7eb5-4b5a-b026-3e0b06f9646b' }),
       });
 
       console.log('[SHIELD] Backend response status:', res.status);
