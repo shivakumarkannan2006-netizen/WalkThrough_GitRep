@@ -32,9 +32,9 @@ class Settings:
     BROWSERBASE_API_KEY: str = os.getenv("BROWSERBASE_API_KEY", "")
     BROWSERBASE_PROJECT_ID: str = os.getenv("BROWSERBASE_PROJECT_ID", "")
 
-    # Server — Railway injects PORT; fall back to 8000 for local dev
+    # Server — Railway injects PORT; fall back to 8080 for local dev
     SERVER_HOST: str = os.getenv("SERVER_HOST", "0.0.0.0")
-    SERVER_PORT: int = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8000")))
+    SERVER_PORT: int = int(os.getenv("PORT", os.getenv("SERVER_PORT", "8080")))
     LOG_LEVEL: str = os.getenv("LOG_LEVEL", "INFO")
 
     # Audit Thresholds
