@@ -3,7 +3,7 @@ import {
   Shield, Zap, AlertTriangle, CheckCircle, Clock, Play,
   LogOut, ChevronRight, Globe, Code, Database,
   Cpu, Cloud, Lock, Eye, EyeOff, BarChart3, ArrowLeft, X, Menu, Plus,
-  Users, Ban, Trash2, RefreshCw, ExternalLink, Star, Upload, FileText,
+  Users, Ban, Trash2, RefreshCw, ExternalLink, Star,
 } from 'lucide-react';
 import { supabase } from './supabase';
 import { ErrorBoundary } from './ErrorBoundary';
@@ -610,14 +610,8 @@ function DashboardPage({
   const [sites, setSites] = useState<Site[]>([]);
   const [loading, setLoading] = useState(true);
   const [auditSessions, setAuditSessions] = useState<Record<string, AuditSession[]>>({});
+  // activeSiteId: which site row is expanded with audit tabs
   const [activeSiteId, setActiveSiteId] = useState<string | null>(null);
-
-  // PDF document management
-  const [pdfDocs, setPdfDocs] = useState<{ id: string; file_name: string; document_type: string; created_at?: string }[]>([]);
-  const [pdfUploading, setPdfUploading] = useState(false);
-  const [pdfUploadStatus, setPdfUploadStatus] = useState<'idle' | 'success' | 'error'>('idle');
-  const [pdfUploadMsg, setPdfUploadMsg] = useState('');
-  const pdfInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     console.log('[DashboardPage] fetching user_sites for', profile.id);
@@ -651,48 +645,6 @@ function DashboardPage({
         }
       });
   }, [profile.id]);
-
-  useEffect(() => {
-    const AUDIT_API_URL = (import.meta.env.VITE_AUDIT_API_URL as string | undefined)?.replace(/\/+$/, '') ?? '';
-    if (!AUDIT_API_URL) return;
-    fetch(`${AUDIT_API_URL}/api/company/${profile.id}/documents`)
-      .then(r => r.ok ? r.json() : { documents: [] })
-      .then(d => setPdfDocs(d.documents ?? []))
-      .catch(() => {/* silently ignore if backend not reachable */});
-  }, [profile.id]);
-
-  const handlePdfUpload = async (files: FileList | null) => {
-    if (!files || files.length === 0) return;
-    const AUDIT_API_URL = (import.meta.env.VITE_AUDIT_API_URL as string | undefined)?.replace(/\/+$/, '') ?? '';
-    if (!AUDIT_API_URL) { setPdfUploadStatus('error'); setPdfUploadMsg('Backend URL not configured.'); return; }
-    setPdfUploading(true);
-    setPdfUploadStatus('idle');
-    setPdfUploadMsg('');
-    try {
-      const form = new FormData();
-      Array.from(files).forEach(f => form.append('files', f));
-      const res = await fetch(`${AUDIT_API_URL}/api/upload-company-pdfs?company_id=${encodeURIComponent(profile.id)}`, {
-        method: 'POST',
-        body: form,
-      });
-      if (!res.ok) { const t = await res.text(); throw new Error(t); }
-      const data = await res.json();
-      const count = (data.uploaded_files ?? []).length;
-      setPdfUploadStatus('success');
-      setPdfUploadMsg(`${count} document${count !== 1 ? 's' : ''} uploaded and indexed.`);
-      // Refresh document list
-      fetch(`${AUDIT_API_URL}/api/company/${profile.id}/documents`)
-        .then(r => r.ok ? r.json() : { documents: [] })
-        .then(d => setPdfDocs(d.documents ?? []))
-        .catch(() => {});
-    } catch (err) {
-      setPdfUploadStatus('error');
-      setPdfUploadMsg(err instanceof Error ? err.message : 'Upload failed.');
-    } finally {
-      setPdfUploading(false);
-      if (pdfInputRef.current) pdfInputRef.current.value = '';
-    }
-  };
 
   // Group sites by base URL (same domain = same group, shown as tabs)
   const grouped = sites.reduce<Record<string, Site[]>>((acc, s) => {
@@ -835,74 +787,6 @@ function DashboardPage({
             </div>
           )}
         </div>
-
-        {/* Policy Documents for Vault Counsel */}
-        <div className="mt-10">
-          <h2 className="text-sm font-semibold text-gray-500 uppercase tracking-wide mb-4">Policy Documents</h2>
-          <div className="bg-white border border-gray-200 rounded-xl p-6">
-            <div className="flex items-start gap-4 mb-5">
-              <div className="w-10 h-10 bg-teal-50 rounded-lg flex items-center justify-center flex-shrink-0">
-                <Lock className="w-5 h-5 text-teal-600" />
-              </div>
-              <div>
-                <p className="text-gray-900 font-semibold text-sm">Vault Counsel Reference Documents</p>
-                <p className="text-gray-400 text-xs mt-0.5">Upload your company privacy policy, terms of service, or legal guidelines. The AI lawyer agent will cross-reference these against every page it audits.</p>
-              </div>
-            </div>
-
-            {/* Upload area */}
-            <div
-              className="border-2 border-dashed border-gray-200 hover:border-teal-400 rounded-xl p-8 text-center transition cursor-pointer group"
-              onClick={() => pdfInputRef.current?.click()}
-            >
-              <input
-                ref={pdfInputRef}
-                type="file"
-                accept=".pdf"
-                multiple
-                className="hidden"
-                onChange={e => handlePdfUpload(e.target.files)}
-              />
-              <Upload className="w-8 h-8 text-gray-300 group-hover:text-teal-400 mx-auto mb-2 transition" />
-              <p className="text-gray-600 text-sm font-medium group-hover:text-teal-700 transition">
-                {pdfUploading ? 'Uploading and indexing…' : 'Click to upload PDF documents'}
-              </p>
-              <p className="text-gray-400 text-xs mt-1">PDF files only · multiple files supported</p>
-            </div>
-
-            {/* Status message */}
-            {pdfUploadStatus === 'success' && (
-              <div className="mt-3 flex items-center gap-2 bg-green-50 border border-green-200 text-green-700 text-sm rounded-lg px-4 py-2.5">
-                <CheckCircle className="w-4 h-4 flex-shrink-0" />
-                {pdfUploadMsg}
-              </div>
-            )}
-            {pdfUploadStatus === 'error' && (
-              <div className="mt-3 flex items-center gap-2 bg-red-50 border border-red-200 text-red-700 text-sm rounded-lg px-4 py-2.5">
-                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                {pdfUploadMsg}
-              </div>
-            )}
-
-            {/* Uploaded document list */}
-            {pdfDocs.length > 0 && (
-              <div className="mt-4 space-y-2">
-                <p className="text-xs font-medium text-gray-400 uppercase tracking-wide mb-2">Indexed Documents</p>
-                {pdfDocs.map(doc => (
-                  <div key={doc.id} className="flex items-center gap-3 bg-gray-50 border border-gray-100 rounded-lg px-4 py-2.5">
-                    <FileText className="w-4 h-4 text-teal-500 flex-shrink-0" />
-                    <div className="min-w-0 flex-1">
-                      <p className="text-sm text-gray-700 font-medium truncate">{doc.file_name}</p>
-                      <p className="text-xs text-gray-400 capitalize">{doc.document_type}</p>
-                    </div>
-                    <span className="text-xs text-green-600 font-medium bg-green-50 px-2 py-0.5 rounded-full">Indexed</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </div>
-
       </div>
     </div>
   );
@@ -1122,12 +1006,10 @@ function EvaluationPage({
 function AuditResultsPage({
   auditUrl,
   existingSessionId,
-  companyId,
   onNavigate,
 }: {
   auditUrl: string;
   existingSessionId: string | null;
-  companyId: string;
   onNavigate: (p: Page) => void;
 }) {
   const isPastAudit = !!existingSessionId;
@@ -1179,7 +1061,7 @@ function AuditResultsPage({
       const res = await fetch(`${AUDIT_API}/api/start-audit`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ target_url: auditUrl, company_id: companyId }),
+        body: JSON.stringify({ target_url: auditUrl, company_id: '6f7e7833-7eb5-4b5a-b026-3e0b06f9646b' }),
       });
 
       if (!res.ok) {
@@ -1888,7 +1770,7 @@ export default function App() {
 
         <ErrorBoundary name="AuditResultsPage">
           {page === 'audit-results' && (
-            <AuditResultsPage auditUrl={auditUrl} existingSessionId={auditSessionId} companyId={profile?.id ?? ''} onNavigate={handleNavigate} />
+            <AuditResultsPage auditUrl={auditUrl} existingSessionId={auditSessionId} onNavigate={handleNavigate} />
           )}
         </ErrorBoundary>
 

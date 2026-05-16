@@ -313,81 +313,33 @@ async def get_audit_report(audit_session_id: str):
 
 # ============== PDF MANAGEMENT ==============
 
-_PDF_CHUNK_SIZE = 500  # words per chunk
-_PDF_CHUNK_OVERLAP = 50  # words of overlap between consecutive chunks
-
-
-def _chunk_text(text: str, chunk_size: int = _PDF_CHUNK_SIZE, overlap: int = _PDF_CHUNK_OVERLAP) -> List[str]:
-    """Split text into overlapping word-based chunks."""
-    words = text.split()
-    chunks = []
-    step = chunk_size - overlap
-    for i in range(0, len(words), step):
-        chunk = " ".join(words[i : i + chunk_size])
-        if chunk.strip():
-            chunks.append(chunk.strip())
-        if i + chunk_size >= len(words):
-            break
-    return chunks
-
-
 @app.post("/api/upload-company-pdfs")
 async def upload_company_pdfs(
     company_id: str,
     files: List[UploadFile] = File(...),
     document_types: Optional[List[str]] = None,
 ):
-    """Upload company legal/policy PDFs, extract text, and store chunks for RAG."""
-    import fitz  # PyMuPDF
+    """Upload company legal/policy PDFs for RAG pipeline"""
     if not supabase:
         raise HTTPException(status_code=503, detail="Backend not ready - Supabase unavailable")
     try:
         uploaded_files = []
-        for idx, file in enumerate(files):
+        for file in files:
+            # Store file in Supabase storage and database
             file_id = str(uuid.uuid4())
-            pdf_bytes = await file.read()
 
-            # Extract full text from all pages
-            full_text = ""
-            try:
-                doc = fitz.open(stream=pdf_bytes, filetype="pdf")
-                for page in doc:
-                    full_text += page.get_text() + "\n"
-                doc.close()
-            except Exception as e:
-                logger.warning(f"PDF text extraction failed for {file.filename}: {e}")
-
+            # For now, just store metadata
             doc_data = {
                 "id": file_id,
                 "company_id": company_id,
                 "file_name": file.filename,
                 "file_path": f"documents/{company_id}/{file_id}",
-                "document_type": (document_types[idx] if document_types and idx < len(document_types) else "legal"),
-                "file_size_bytes": len(pdf_bytes),
+                "document_type": document_types[uploaded_files.__len__()] if document_types else "legal",
+                "file_size_bytes": file.size,
             }
+
             supabase.table("company_documents").insert(doc_data).execute()
-
-            # Chunk and store text for RAG
-            if full_text.strip():
-                chunks = _chunk_text(full_text)
-                chunk_rows = [
-                    {
-                        "id": str(uuid.uuid4()),
-                        "company_document_id": file_id,
-                        "chunk_index": i,
-                        "chunk_text": chunk,
-                    }
-                    for i, chunk in enumerate(chunks)
-                ]
-                if chunk_rows:
-                    supabase.table("company_document_embeddings").insert(chunk_rows).execute()
-                logger.info(f"Stored {len(chunk_rows)} chunks for document {file.filename}")
-
-            uploaded_files.append({
-                "file_id": file_id,
-                "filename": file.filename,
-                "chunks_stored": len(_chunk_text(full_text)) if full_text.strip() else 0,
-            })
+            uploaded_files.append({"file_id": file_id, "filename": file.filename})
 
         return {"status": "success", "uploaded_files": uploaded_files}
     except Exception as e:
