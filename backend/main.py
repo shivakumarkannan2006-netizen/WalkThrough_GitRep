@@ -420,21 +420,37 @@ async def run_audit(audit_session_id: str):
         # Start BFS traversal
         pages = await navigator.start_traversal()
 
-        # Run crew analysis on each page — check stop flag before each page
-        for page in pages:
+        # Run crew analysis on each PageBundle — check stop flag before each page
+        for bundle in pages:
             if session_data.get("stop_requested"):
                 logger.info(f"Audit {audit_session_id} stopped by user after navigator phase")
                 break
-            await orchestrator.analyze_page(page)
+            await orchestrator.analyze_page(bundle)
+
+        # Cross-page consistency checks (pricing, contact ghosting)
+        if not session_data.get("stop_requested"):
+            await orchestrator.run_post_traversal_pass()
 
         stopped = session_data.get("stop_requested", False)
         final_status = "stopped" if stopped else "completed"
+
+        # Count total issues for session summary
+        total_issues = 0
+        if supabase:
+            try:
+                issues_resp = supabase.table("audit_issues").select("id", count="exact").eq(
+                    "audit_session_id", audit_session_id
+                ).execute()
+                total_issues = issues_resp.count or 0
+            except Exception:
+                pass
 
         # Update session as completed/stopped
         if supabase:
             supabase.table("audit_sessions").update({
                 "status": final_status,
                 "total_pages_discovered": len(pages),
+                "total_issues_found": total_issues,
                 "completed_at": datetime.now(timezone.utc).isoformat(),
             }).eq("id", audit_session_id).execute()
 

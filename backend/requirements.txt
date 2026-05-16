@@ -9,10 +9,10 @@ gotrue==2.8.1
 beautifulsoup4==4.12.2
 PyMuPDF>=1.25.1
 pyspellchecker==0.8.0
-google-generativeai==0.3.0
+google-generativeai==0.8.3
 langchain==0.1.20
-exifread==3.0.0
 pillow>=11.0.0
+textstat>=0.7.3
 aiofiles==23.2.1
 python-multipart==0.0.6
 websockets==12.0

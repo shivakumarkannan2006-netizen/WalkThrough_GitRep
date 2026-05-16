@@ -25,8 +25,10 @@ class Settings:
     SUPABASE_KEY: str = os.getenv("SUPABASE_KEY", "")
     SUPABASE_SERVICE_ROLE_KEY: str = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "")
 
-    # LLM
+    # LLM — Gemini 1.5 Flash for all vision + text analysis
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-1.5-flash")
+    GEMINI_VISION_MAX_TOKENS: int = int(os.getenv("GEMINI_VISION_MAX_TOKENS", "4096"))
 
     # Browserbase
     BROWSERBASE_API_KEY: str = os.getenv("BROWSERBASE_API_KEY", "")
@@ -44,6 +46,16 @@ class Settings:
     INTERACTION_TIMEOUT_MS: int = int(os.getenv("INTERACTION_TIMEOUT_MS", "300"))
     LOADING_STATE_THRESHOLD_MS: int = int(os.getenv("LOADING_STATE_THRESHOLD_MS", "300"))
     PERFORMANCE_BASELINE_THRESHOLD_MS: int = int(os.getenv("PERFORMANCE_BASELINE_THRESHOLD_MS", "2000"))
+
+    # Screenshot compression — forces single-tile evaluation in Gemini (258 tokens/image)
+    SCREENSHOT_MAX_WIDTH: int = int(os.getenv("SCREENSHOT_MAX_WIDTH", "1024"))
+    SCREENSHOT_JPEG_QUALITY: int = int(os.getenv("SCREENSHOT_JPEG_QUALITY", "75"))
+
+    # EXIF — max images to check per page (avoids excessive httpx downloads)
+    EXIF_MAX_IMAGES_PER_PAGE: int = int(os.getenv("EXIF_MAX_IMAGES_PER_PAGE", "20"))
+
+    # External link verification timeout
+    EXTERNAL_LINK_TIMEOUT_S: int = int(os.getenv("EXTERNAL_LINK_TIMEOUT_S", "10"))
 
     # Playwright — flags required for containerized/Railway environments
     PLAYWRIGHT_HEADLESS: bool = True
