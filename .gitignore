@@ -24,3 +24,4 @@ dist-ssr
 backend/.venv
 __pycache__/
 *.pyc
+.cursor/hooks/auto-push.log

@@ -1,0 +1,23 @@
+---
+description: Auto commit and push to origin/main after every completed coding task
+alwaysApply: true
+---
+
+# Auto deploy (commit + push)
+
+At the **end of every completed coding task** (including after the user accepts agent edits):
+
+1. Run `git status` and `git diff`. If there are no changes to commit, skip push.
+2. Stage only relevant files. Never stage: `.env`, `**/.env`, `backend/.venv`, `__pycache__/`, `*.pyc`, `.cursor/hooks/auto-push.log`.
+3. Commit with a clear message using a HEREDOC (1–2 sentences, focus on why).
+4. Push to `origin main` using the Shell tool with full permissions (not sandboxed):
+   - Request `all` permissions so macOS Keychain and network work for git.
+5. Report the commit hash and confirm `git push` succeeded.
+
+If `git push` fails:
+
+- Paste the exact error.
+- Do **not** tell the user to use Terminal unless they must complete a one-time GitHub browser login (`gh auth login --web`) or add an SSH key.
+- If auth is wrong (403, permission denied), run `gh auth status` and suggest `gh auth login --web --git-protocol https` once.
+
+Railway deploys automatically when `main` on GitHub updates (backend service watches this repo).
