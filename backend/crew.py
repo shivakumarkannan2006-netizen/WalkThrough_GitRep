@@ -13,23 +13,25 @@ All agents run via asyncio.gather() in parallel.
 import asyncio
 import base64
 import io
+import json
 import logging
 import re
 import time
 from datetime import datetime, timezone
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import httpx
 import textstat
 from PIL import Image
 
 import google.generativeai as genai
-from google.generativeai.types import HarmCategory, HarmBlockThreshold
 
 from config import get_settings
 from navigator import PageBundle
 
 logger = logging.getLogger(__name__)
+
+LLM_SYSTEM_AGENT = "system"
 
 # ---------------------------------------------------------------------------
 # Gemini helpers
@@ -43,6 +45,106 @@ def _build_image_part(b64_str: str) -> Dict:
 def _init_gemini(api_key: str, model_name: str):
     genai.configure(api_key=api_key)
     return genai.GenerativeModel(model_name)
+
+
+def _validate_call_a(data: Dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return all(k in data for k in CALL_A_SCHEMA["required"])
+
+
+def _validate_call_b(data: Dict) -> bool:
+    if not isinstance(data, dict):
+        return False
+    return all(k in data for k in CALL_B_SCHEMA["required"])
+
+
+def _parse_json_response(text: str) -> Dict:
+    if not text:
+        return {}
+    try:
+        return json.loads(text)
+    except json.JSONDecodeError:
+        match = re.search(r"\{[\s\S]*\}", text)
+        if match:
+            try:
+                return json.loads(match.group())
+            except json.JSONDecodeError:
+                pass
+    return {}
+
+
+def _usage_from_response(response) -> int:
+    try:
+        um = response.usage_metadata
+        if um:
+            return int((um.prompt_token_count or 0) + (um.candidates_token_count or 0))
+    except Exception:
+        pass
+    return 0
+
+
+async def _generate_json_with_retry(
+    model,
+    content,
+    *,
+    required_keys: List[str],
+    validator,
+    settings,
+) -> Tuple[Dict, int, int]:
+    """Call Gemini with retries; returns (parsed_dict, tokens_used, latency_ms)."""
+    max_tokens = settings.gemini_max_output_tokens()
+    last_error = None
+    for attempt in range(settings.GEMINI_MAX_RETRIES):
+        t0 = time.time()
+        try:
+            response = await asyncio.to_thread(
+                model.generate_content,
+                content,
+                generation_config=genai.GenerationConfig(
+                    response_mime_type="application/json",
+                    max_output_tokens=max_tokens,
+                ),
+            )
+            latency_ms = int((time.time() - t0) * 1000)
+            tokens = _usage_from_response(response)
+            if not response.text:
+                raise ValueError("Empty Gemini response text")
+            parsed = _parse_json_response(response.text)
+            if validator(parsed):
+                return parsed, tokens, latency_ms
+            last_error = ValueError("JSON missing required keys")
+            content = (
+                content
+                if isinstance(content, str)
+                else list(content)
+            )
+            if isinstance(content, list):
+                content = content + [
+                    "\n\nYour previous response was invalid. Return ONLY valid JSON matching the schema."
+                ]
+            else:
+                content = content + "\n\nReturn ONLY valid JSON matching the schema."
+        except Exception as e:
+            last_error = e
+            logger.warning(f"Gemini attempt {attempt + 1} failed: {e}")
+            if attempt < settings.GEMINI_MAX_RETRIES - 1:
+                await asyncio.sleep(2 ** attempt)
+    logger.error(f"Gemini failed after retries: {last_error}")
+    return {}, 0, 0
+
+
+def _interaction_ambiguous(bundle: PageBundle) -> bool:
+    """True when programmatic checks need vision corroboration."""
+    for timing in bundle.click_interaction_timings:
+        if timing.get("response_ms", 0) > 500 and not timing.get("had_spinner"):
+            return True
+    for form in bundle.form_interaction_results:
+        post = form.get("post_html", "")
+        pre_len = form.get("pre_html_len", 0)
+        if abs(len(post) - pre_len) > 200 and form.get("input_type") in ("empty", "spacebar"):
+            return True
+    return False
 
 
 # ---------------------------------------------------------------------------
@@ -126,82 +228,76 @@ CALL_A_SCHEMA = {
 }
 
 
-async def _call_a_vision(model, bundle: PageBundle) -> Dict:
-    """Batched vision call: desktop + mobile + back button + rage click screenshots."""
+async def _call_a_vision(model, bundle: PageBundle, settings) -> Tuple[Dict, int, int]:
+    """Batched vision call: desktop + mobile + interaction screenshots."""
+    settings = settings or get_settings()
+    if not settings.ENABLE_SCREENSHOTS:
+        return {}, 0, 0
+    if not bundle.screenshot_desktop_b64 and not bundle.screenshot_mobile_b64:
+        return {}, 0, 0
+
     try:
-        parts = [
-            "You are a team of senior web audit experts. Analyze the provided screenshots carefully.\n\n"
-            "Image 1: Desktop screenshot (1280px)\n"
-            "Image 2: Mobile screenshot (375px)\n",
-        ]
         images = []
+        notes = ["You are a team of senior web audit experts. Analyze the provided screenshots.\n"]
 
         if bundle.screenshot_desktop_b64:
             images.append(_build_image_part(bundle.screenshot_desktop_b64))
+            notes.append(f"Image {len(images)}: Desktop screenshot (1280px)\n")
         if bundle.screenshot_mobile_b64:
             images.append(_build_image_part(bundle.screenshot_mobile_b64))
-
-        # Include FOUT comparison if both screenshots exist
-        fout_note = ""
+            notes.append(f"Image {len(images)}: Mobile screenshot (375px)\n")
         if bundle.screenshot_fout_b64:
             images.append(_build_image_part(bundle.screenshot_fout_b64))
-            fout_note = f"Image {len(images)}: FOUT screenshot (taken before fonts loaded)\n"
-
-        # Include back button screenshot if triggered
-        back_note = ""
+            notes.append(f"Image {len(images)}: FOUT screenshot (before fonts loaded)\n")
         if bundle.back_button_result.get("triggered") and bundle.back_button_result.get("screenshot_b64"):
             images.append(_build_image_part(bundle.back_button_result["screenshot_b64"]))
-            back_note = f"Image {len(images)}: Back-button result screenshot\n"
-
-        # Include rage click screenshot if present
-        rage_note = ""
+            notes.append(f"Image {len(images)}: Back-button result screenshot\n")
         if bundle.persona_frustrated_screenshot_b64:
             images.append(_build_image_part(bundle.persona_frustrated_screenshot_b64))
-            rage_note = f"Image {len(images)}: After 5 rapid button clicks (frustrated user simulation)\n"
-
-        # Include password field screenshot if present
-        pwd_note = ""
+            notes.append(f"Image {len(images)}: After rage-click simulation\n")
         if bundle.password_field_screenshots:
             images.append(_build_image_part(bundle.password_field_screenshots[0]["screenshot_b64"]))
-            pwd_note = f"Image {len(images)}: Password/sensitive input field (filled with test value)\n"
+            notes.append(f"Image {len(images)}: Password field with test value\n")
+
+        if _interaction_ambiguous(bundle):
+            for timing in bundle.click_interaction_timings:
+                snap = timing.get("snapshot_b64")
+                if snap:
+                    images.append(_build_image_part(snap))
+                    notes.append(
+                        f"Image {len(images)}: After clicking '{timing.get('selector', 'button')}'\n"
+                    )
+                    break
+            for form in bundle.form_interaction_results:
+                snap = form.get("post_screenshot_b64")
+                if snap:
+                    images.append(_build_image_part(snap))
+                    notes.append(
+                        f"Image {len(images)}: After form submit ({form.get('input_type', 'test')})\n"
+                    )
+                    break
 
         prompt = (
-            parts[0]
-            + fout_note + back_note + rage_note + pwd_note
-            + "\nFor ALL images provided, return a JSON audit using the exact schema requested.\n\n"
-            "contrast_issues: List every text element that is hard to read due to low colour contrast.\n"
-            "layout_overlaps: Sticky headers over menus, popups behind content, notification hidden under elements.\n"
-            "placeholder_text: Any visible Lorem ipsum, TODO, FIXME, placeholder, or test text.\n"
-            "dark_patterns: Deceptive UI — tiny cancel buttons, pre-ticked boxes, misleading labels, fake urgency.\n"
-            "mobile_keyboard_collision: Does keyboard or any bottom overlay cover important content on mobile?\n"
-            "horizontal_overflow_visual: Does any element visually extend beyond the viewport edge?\n"
-            "general_polish_issues: Typos in visible text, broken spacing, illegible text, unfinished elements.\n"
-            "empty_state: Is this an empty dashboard/cart/list with no CTA guiding next steps?\n"
-            "tone_sections: Describe the writing tone in the hero area, main body, and footer/legal area.\n"
-            "psychology_enhancements: 3-5 specific psychology-based UI improvements for conversion and value.\n"
-            "password_field_visible: Is the password field content visible as plaintext instead of dots?\n"
-            "back_button_result_issue: Does the back-button screenshot show a login wall or document-expired error?\n"
-            "rage_click_result_issue: After 5 rapid clicks, is there broken UI, duplicate submissions, or no feedback?\n"
-            "fout_detected: Comparing FOUT screenshot vs desktop — is there a visible font change (e.g. Times New Roman flash)?\n"
+            "".join(notes)
+            + "\nReturn JSON with keys: "
+            + ", ".join(CALL_A_SCHEMA["required"])
+            + ".\n"
+            "contrast_issues, layout_overlaps, placeholder_text, dark_patterns, "
+            "mobile_keyboard_collision, horizontal_overflow_visual, general_polish_issues, "
+            "empty_state, tone_sections, psychology_enhancements, password_field_visible, "
+            "back_button_result_issue, rage_click_result_issue, fout_detected."
         )
-
         content = [prompt] + images
-
-        response = await asyncio.to_thread(
-            model.generate_content,
+        return await _generate_json_with_retry(
+            model,
             content,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                max_output_tokens=4096,
-            ),
+            required_keys=CALL_A_SCHEMA["required"],
+            validator=_validate_call_a,
+            settings=settings,
         )
-
-        import json
-        return json.loads(response.text)
-
     except Exception as e:
         logger.error(f"Call A vision error for {bundle.url}: {e}")
-        return {}
+        return {}, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -241,63 +337,52 @@ CALL_B_SCHEMA = {
 }
 
 
-async def _call_b_text(model, bundle: PageBundle, pdf_rag_chunks: List[str] = None) -> Dict:
+async def _call_b_text(
+    model, bundle: PageBundle, pdf_rag_chunks: List[str] = None, settings=None
+) -> Tuple[Dict, int, int]:
     """Text-only compliance, copy quality, and GDPR analysis."""
+    settings = settings or get_settings()
     try:
         text_content = "\n".join(bundle.page_text_blocks[:100])
-        testimonials_text = "\n---\n".join(bundle.testimonial_blocks[:10]) if bundle.testimonial_blocks else "None found"
-
-        # Ambiguous console logs (passed in after regex pre-filter)
+        testimonials_text = (
+            "\n---\n".join(bundle.testimonial_blocks[:10])
+            if bundle.testimonial_blocks
+            else "None found"
+        )
         ambiguous_logs = [
-            e["text"] for e in bundle.console_logs
+            e["text"]
+            for e in bundle.console_logs
             if len(e.get("text", "")) > 20 and e.get("type") in ("error", "warning", "log")
         ][:20]
         console_text = "\n".join(ambiguous_logs) if ambiguous_logs else "None"
-
         pdf_section = ""
         if pdf_rag_chunks:
             pdf_section = (
-                "\n\nCOMPANY POLICY DOCUMENTS (compare against page text):\n"
-                + "\n---\n".join(pdf_rag_chunks[:5])
+                "\n\nCOMPANY POLICY DOCUMENTS:\n" + "\n---\n".join(pdf_rag_chunks[:5])
             )
 
         prompt = (
             f"You are a legal compliance expert, senior copywriter, and UX auditor.\n\n"
             f"PAGE URL: {bundle.url}\n\n"
-            f"PAGE TEXT (first 100 paragraphs/headings):\n{text_content}\n\n"
+            f"PAGE TEXT:\n{text_content}\n\n"
             f"TESTIMONIALS:\n{testimonials_text}\n\n"
             f"BROWSER CONSOLE LOGS:\n{console_text}\n\n"
-            f"PRICES FOUND ON PAGE: {', '.join(bundle.prices_found) if bundle.prices_found else 'None'}\n"
-            f"CONTACT INFO FOUND: {', '.join(bundle.contact_info_found) if bundle.contact_info_found else 'None'}\n"
+            f"PRICES: {', '.join(bundle.prices_found) if bundle.prices_found else 'None'}\n"
+            f"CONTACT: {', '.join(bundle.contact_info_found) if bundle.contact_info_found else 'None'}\n"
             + pdf_section
-            + "\n\nReturn your full audit as JSON using the exact schema.\n\n"
-            "gdpr_issues: Specific GDPR, AI Act, or data protection violations with article references.\n"
-            "ai_act_issues: EU AI Act compliance concerns.\n"
-            "ai_generated_copy_score: 0-100 likelihood this copy was AI-generated (100=definitely AI).\n"
-            "ai_generated_copy_explanation: Why you scored it that way.\n"
-            "reading_level_grade: Flesch-Kincaid grade level of main body text.\n"
-            "testimonial_authenticity: Score each testimonial 0-100 for AI likelihood with reason.\n"
-            "pricing_claims: Extract all price values mentioned.\n"
-            "contact_info: Extract all emails and phone numbers.\n"
-            "console_sensitive_data: Any console entries that look like leaked API keys, JWTs, DB URLs, or credentials.\n"
-            "pdf_contradictions: Claims on the page that contradict the company policy documents provided.\n"
+            + "\n\nReturn JSON with keys: "
+            + ", ".join(CALL_B_SCHEMA["required"])
         )
-
-        response = await asyncio.to_thread(
-            model.generate_content,
+        return await _generate_json_with_retry(
+            model,
             prompt,
-            generation_config=genai.GenerationConfig(
-                response_mime_type="application/json",
-                max_output_tokens=4096,
-            ),
+            required_keys=CALL_B_SCHEMA["required"],
+            validator=_validate_call_b,
+            settings=settings,
         )
-
-        import json
-        return json.loads(response.text)
-
     except Exception as e:
         logger.error(f"Call B text error for {bundle.url}: {e}")
-        return {}
+        return {}, 0, 0
 
 
 # ---------------------------------------------------------------------------
@@ -313,17 +398,66 @@ class CrewOrchestrator:
         self.broadcast = broadcast_fn or (lambda x: None)
         self.settings = get_settings()
 
-        # Cross-page data collected for post-traversal pass
-        self._all_prices: List[Dict] = []          # [{url, prices}]
-        self._all_contacts: List[Dict] = []        # [{url, contacts}]
+        self._all_prices: List[Dict] = []
+        self._all_contacts: List[Dict] = []
+        self._page_metas: List[Dict] = []
+        self._gemini_calls_made = 0
+        self._llm_budget_exhausted = False
 
-        # Gemini model instance (shared across all calls)
         self._model = None
-        if self.settings.GEMINI_API_KEY:
-            try:
-                self._model = _init_gemini(self.settings.GEMINI_API_KEY, self.settings.GEMINI_MODEL)
-            except Exception as e:
-                logger.error(f"Gemini init error: {e}")
+        if self.settings.ENABLE_LLM_ANALYSIS:
+            if not self.settings.GEMINI_API_KEY:
+                logger.error("ENABLE_LLM_ANALYSIS is true but GEMINI_API_KEY is missing")
+            else:
+                try:
+                    self._model = _init_gemini(
+                        self.settings.GEMINI_API_KEY, self.settings.GEMINI_MODEL
+                    )
+                except Exception as e:
+                    logger.error(f"Gemini init error: {e}")
+
+    def _gemini_budget_remaining(self) -> bool:
+        cap = self.settings.MAX_GEMINI_CALLS_PER_AUDIT
+        if cap <= 0:
+            return True
+        return self._gemini_calls_made < cap
+
+    def _should_run_call_a(self, bundle: PageBundle) -> bool:
+        if not self.settings.ENABLE_LLM_ANALYSIS or self.settings.is_quick_profile():
+            return False
+        if not self._model or self._llm_budget_exhausted:
+            return False
+        if not self.settings.ENABLE_SCREENSHOTS:
+            return False
+        if not bundle.screenshot_desktop_b64 and not bundle.screenshot_mobile_b64:
+            return False
+        return self._gemini_budget_remaining()
+
+    def _should_run_call_b(self, bundle: PageBundle) -> bool:
+        if not self.settings.ENABLE_LLM_ANALYSIS or self.settings.is_quick_profile():
+            return False
+        if not self._model or self._llm_budget_exhausted:
+            return False
+        thin = len(bundle.page_text_blocks) < 5
+        has_signals = bool(
+            bundle.testimonial_blocks or bundle.prices_found or bundle.contact_info_found
+        )
+        if thin and not has_signals:
+            return False
+        return self._gemini_budget_remaining()
+
+    def _record_llm_unavailable(
+        self, url: str, audit_page_id: str, call_name: str, reason: str
+    ) -> None:
+        self._save_issue(
+            LLM_SYSTEM_AGENT,
+            "LLM Analysis Unavailable",
+            f"{call_name} skipped for {url}: {reason}",
+            "medium",
+            url,
+            audit_page_id,
+            "Verify GEMINI_API_KEY, quotas, and ENABLE_LLM_ANALYSIS settings.",
+        )
 
     async def analyze_page(self, bundle: PageBundle):
         """Run all agents + monitors in parallel on a pre-collected PageBundle."""
@@ -333,26 +467,94 @@ class CrewOrchestrator:
 
         try:
             url = bundle.url
+            pid = bundle.audit_page_id
             logger.info(f"Crew analyzing: {url}")
 
-            # Fetch PDF RAG chunks if available
+            self._page_metas.append({
+                "url": url,
+                "title": bundle.page_title,
+                "meta_description": getattr(bundle, "meta_description", "") or "",
+            })
+
             pdf_chunks = await self._fetch_rag_chunks(bundle)
 
-            # Fire both LLM calls concurrently — results shared across all agents
-            call_a_result, call_b_result = await asyncio.gather(
-                _call_a_vision(self._model, bundle) if self._model else asyncio.sleep(0, result={}),
-                _call_b_text(self._model, bundle, pdf_chunks) if self._model else asyncio.sleep(0, result={}),
-                return_exceptions=True,
-            )
-            if isinstance(call_a_result, Exception):
-                logger.error(f"Call A failed for {url}: {call_a_result}")
-                call_a_result = {}
-            if isinstance(call_b_result, Exception):
-                logger.error(f"Call B failed for {url}: {call_b_result}")
-                call_b_result = {}
+            run_a = self._should_run_call_a(bundle)
+            run_b = self._should_run_call_b(bundle)
 
-            # Log LLM interactions for cost tracking
-            await self._log_llm_interactions(url, call_a_result, call_b_result)
+            if self.settings.ENABLE_LLM_ANALYSIS and not self.settings.is_quick_profile():
+                if not self._model:
+                    self._record_llm_unavailable(
+                        url, pid, "Vision and text analysis",
+                        "Gemini model not initialized (missing or invalid API key)",
+                    )
+                elif self._llm_budget_exhausted:
+                    self._record_llm_unavailable(
+                        url, pid, "Vision and text analysis",
+                        f"Gemini call budget exhausted ({self.settings.MAX_GEMINI_CALLS_PER_AUDIT} calls)",
+                    )
+
+            call_a_result: Dict = {}
+            call_b_result: Dict = {}
+            metrics: List[Dict] = []
+
+            async def _run_a():
+                if not run_a:
+                    return {}, 0, 0
+                return await _call_a_vision(self._model, bundle, self.settings)
+
+            async def _run_b():
+                if not run_b:
+                    return {}, 0, 0
+                return await _call_b_text(
+                    self._model, bundle, pdf_chunks, self.settings
+                )
+
+            raw_a, raw_b = await asyncio.gather(_run_a(), _run_b(), return_exceptions=True)
+
+            if isinstance(raw_a, Exception):
+                logger.error(f"Call A failed for {url}: {raw_a}")
+                call_a_result, tok_a, lat_a = {}, 0, 0
+            else:
+                call_a_result, tok_a, lat_a = raw_a
+                if run_a:
+                    self._gemini_calls_made += 1
+                    metrics.append({
+                        "agent_name": "call_a_vision",
+                        "tokens": tok_a,
+                        "latency_ms": lat_a,
+                        "response": call_a_result,
+                    })
+
+            if isinstance(raw_b, Exception):
+                logger.error(f"Call B failed for {url}: {raw_b}")
+                call_b_result, tok_b, lat_b = {}, 0, 0
+            else:
+                call_b_result, tok_b, lat_b = raw_b
+                if run_b:
+                    self._gemini_calls_made += 1
+                    metrics.append({
+                        "agent_name": "call_b_text",
+                        "tokens": tok_b,
+                        "latency_ms": lat_b,
+                        "response": call_b_result,
+                    })
+
+            cap = self.settings.MAX_GEMINI_CALLS_PER_AUDIT
+            if cap > 0 and self._gemini_calls_made >= cap:
+                self._llm_budget_exhausted = True
+
+            if run_a and not call_a_result:
+                self._record_llm_unavailable(
+                    url, pid, "Vision analysis (Call A)",
+                    "Gemini returned empty or invalid JSON after retries",
+                )
+            if run_b and not call_b_result:
+                self._record_llm_unavailable(
+                    url, pid, "Text compliance analysis (Call B)",
+                    "Gemini returned empty or invalid JSON after retries",
+                )
+
+            await self._log_llm_interactions(url, metrics)
 
             # Collect cross-page data
             if bundle.prices_found:
@@ -398,8 +600,47 @@ class CrewOrchestrator:
         try:
             await self._check_pricing_consistency()
             await self._check_contact_ghosting()
+            await self._check_duplicate_meta_titles()
         except Exception as e:
             logger.error(f"Post-traversal pass error: {e}")
+
+    async def _check_duplicate_meta_titles(self):
+        """Flag duplicate page titles or meta descriptions across the audit."""
+        if len(self._page_metas) < 2:
+            return
+        title_map: Dict[str, List[str]] = {}
+        meta_map: Dict[str, List[str]] = {}
+        for entry in self._page_metas:
+            title = (entry.get("title") or "").strip()
+            meta = (entry.get("meta_description") or "").strip()
+            if title:
+                title_map.setdefault(title, []).append(entry["url"])
+            if meta and len(meta) > 20:
+                meta_map.setdefault(meta, []).append(entry["url"])
+
+        for title, urls in title_map.items():
+            if len(urls) > 1:
+                self._save_issue(
+                    LLM_SYSTEM_AGENT,
+                    "Duplicate Page Title",
+                    f"Same title '{title[:80]}' on {len(urls)} pages: {', '.join(urls[:5])}",
+                    "medium",
+                    urls[0],
+                    "",
+                    "Use unique, descriptive titles per page for SEO and accessibility.",
+                )
+
+        for meta, urls in meta_map.items():
+            if len(urls) > 1:
+                self._save_issue(
+                    LLM_SYSTEM_AGENT,
+                    "Duplicate Meta Description",
+                    f"Same meta description on {len(urls)} pages: {', '.join(urls[:5])}",
+                    "low",
+                    urls[0],
+                    "",
+                    "Write unique meta descriptions for each page.",
+                )
 
     async def _fetch_rag_chunks(self, bundle: PageBundle) -> List[str]:
         """Fetch top-5 relevant PDF chunks for this page via cosine similarity."""
@@ -415,27 +656,23 @@ class CrewOrchestrator:
             logger.debug(f"RAG fetch error: {e}")
         return []
 
-    async def _log_llm_interactions(self, url: str, call_a: Dict, call_b: Dict):
+    async def _log_llm_interactions(self, url: str, metrics: List[Dict]):
+        if not metrics:
+            return
         try:
             now = datetime.now(timezone.utc).isoformat()
-            rows = [
-                {
+            rows = []
+            for m in metrics:
+                rows.append({
                     "audit_session_id": self.audit_session_id,
-                    "agent_name": "call_a_vision",
-                    "prompt_text": f"Vision analysis for {url}",
+                    "agent_name": m["agent_name"],
+                    "prompt_text": f"{m['agent_name']} for {url}",
                     "llm_model_used": self.settings.GEMINI_MODEL,
-                    "response_text": str(call_a)[:2000],
+                    "response_text": str(m.get("response", {}))[:2000],
+                    "tokens_used": m.get("tokens", 0),
+                    "response_latency_ms": m.get("latency_ms", 0),
                     "timestamp": now,
-                },
-                {
-                    "audit_session_id": self.audit_session_id,
-                    "agent_name": "call_b_text",
-                    "prompt_text": f"Text compliance analysis for {url}",
-                    "llm_model_used": self.settings.GEMINI_MODEL,
-                    "response_text": str(call_b)[:2000],
-                    "timestamp": now,
-                },
-            ]
+                })
             self.supabase.table("llm_interactions").insert(rows).execute()
         except Exception as e:
             logger.debug(f"LLM interaction log error: {e}")

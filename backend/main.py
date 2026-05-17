@@ -398,7 +398,26 @@ async def run_audit(audit_session_id: str):
     try:
         logger.info(f"Starting audit {audit_session_id} for {session_data['target_url']}")
 
-        # Initialize navigator and crew
+        orchestrator = CrewOrchestrator(
+            supabase_client=supabase,
+            audit_session_id=audit_session_id,
+            broadcast_fn=lambda msg: asyncio.create_task(broadcast_audit_update(audit_session_id, msg)),
+        )
+
+        pipelined = settings.PIPELINE_ANALYSIS_CONCURRENCY > 0
+        analysis_tasks: List[asyncio.Task] = []
+        analysis_sem = asyncio.Semaphore(settings.PIPELINE_ANALYSIS_CONCURRENCY)
+
+        async def _analyze_bundle_pipelined(bundle):
+            if session_data.get("stop_requested"):
+                return
+            async with analysis_sem:
+                await orchestrator.analyze_page(bundle)
+
+        def on_page_bundle(bundle):
+            if pipelined:
+                analysis_tasks.append(asyncio.create_task(_analyze_bundle_pipelined(bundle)))
+
         navigator = ShieldNavigator(
             target_url=session_data["target_url"],
             credentials=session_data["credentials"],
@@ -406,26 +425,22 @@ async def run_audit(audit_session_id: str):
             supabase_client=supabase,
             broadcast_fn=lambda msg: asyncio.create_task(broadcast_audit_update(audit_session_id, msg)),
             stop_flag_fn=lambda: active_sessions.get(audit_session_id, {}).get("stop_requested", False),
-        )
-
-        orchestrator = CrewOrchestrator(
-            supabase_client=supabase,
-            audit_session_id=audit_session_id,
-            broadcast_fn=lambda msg: asyncio.create_task(broadcast_audit_update(audit_session_id, msg)),
+            on_page_bundle=on_page_bundle if pipelined else None,
         )
 
         session_data["navigator"] = navigator
         session_data["status"] = "running"
 
-        # Start BFS traversal
         pages = await navigator.start_traversal()
 
-        # Run crew analysis on each PageBundle — check stop flag before each page
-        for bundle in pages:
-            if session_data.get("stop_requested"):
-                logger.info(f"Audit {audit_session_id} stopped by user after navigator phase")
-                break
-            await orchestrator.analyze_page(bundle)
+        if pipelined and analysis_tasks:
+            await asyncio.gather(*analysis_tasks, return_exceptions=True)
+        else:
+            for bundle in pages:
+                if session_data.get("stop_requested"):
+                    logger.info(f"Audit {audit_session_id} stopped by user after navigator phase")
+                    break
+                await orchestrator.analyze_page(bundle)
 
         # Cross-page consistency checks (pricing, contact ghosting)
         if not session_data.get("stop_requested"):
